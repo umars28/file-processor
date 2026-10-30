@@ -101,6 +101,7 @@ func runCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "rows per batch sent between pipeline stages")
 	fs.IntVar(&cfg.MaxErrorsPerFile, "max-errors-per-file", cfg.MaxErrorsPerFile, "row errors kept per file in the report")
 	fs.IntVar(&cfg.MaxRecordBytes, "max-record-bytes", cfg.MaxRecordBytes, "approximate largest CSV record, in bytes, before the file fails")
+	fs.IntVar(&cfg.MaxDailyKeys, "max-daily-keys", cfg.MaxDailyKeys, "distinct (date, outlet, product) keys allowed before the run fails; 0 means no limit")
 	showProgress := fs.Bool("progress", false, "print progress lines to stderr while files are processed")
 	if code, ok := parseFlags(fs, args); !ok {
 		return code

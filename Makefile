@@ -1,7 +1,7 @@
 COVERAGE_MIN ?= 80
 TEST_DATABASE_URL ?= postgres://fileproc:$${POSTGRES_PASSWORD:-fileproc}@127.0.0.1:$${POSTGRES_PORT:-55432}/fileproc?sslmode=disable
 
-.PHONY: test test-integration cover lint vuln secrets check hooks
+.PHONY: test test-integration cover lint vuln secrets check hooks bench latency
 
 test:
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
@@ -26,6 +26,12 @@ secrets:
 	@if git rev-parse -q --verify HEAD >/dev/null; then gitleaks git . --redact --no-banner; fi
 
 check: lint cover vuln secrets
+
+bench:
+	go test -run '^$$' -bench . -benchmem -count=5 ./internal/pipeline/
+
+latency:
+	go test -run TestCancelLatencyWithManyKeys -count=1 -v ./internal/pipeline/
 
 hooks:
 	git config core.hooksPath .githooks

@@ -4,3 +4,4 @@ coverage.html
 /data/*
 !/data/.gitkeep
 coverage.txt
+results.json
