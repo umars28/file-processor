@@ -12,6 +12,12 @@ linters:
     - misspell
     - noctx
     - unconvert
+  exclusions:
+    rules:
+      - path: ^internal/cli/
+        linters:
+          - errcheck
+        text: "Error return value of `fmt\\.Fprint(f|ln)?` is not checked"
 
 formatters:
   enable:

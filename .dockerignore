@@ -1,0 +1,7 @@
+.git
+.claude
+.githooks
+docs
+data
+bin
+coverage.*

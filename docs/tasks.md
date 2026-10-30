@@ -9,11 +9,19 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T1 — Project skeleton
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: 0003, 0004
 - Scope: `go.mod`, package layout with the pipeline as an internal library and `cmd/` holding one binary with `run` (CLI), `serve` (HTTP), and `migrate` subcommands, Dockerfile, compose.yaml with PostgreSQL, `go.uber.org/goleak` dependency. `make check` passes on the empty skeleton.
 
 ### AC
+
+- [ ] `make check` passes on a clean clone: lint, race tests, coverage at or above 80%, `govulncheck`, `gitleaks`.
+- [ ] `go build ./cmd/fileproc` produces one binary with subcommands `run`, `serve`, and `migrate`; `fileproc <subcommand> -h` exits 0 and prints that subcommand's flags.
+- [ ] Edge case: `fileproc` with no arguments, or with an unknown subcommand, prints usage to stderr and exits 2.
+- [ ] Failure case: `fileproc migrate` and `fileproc serve` without `DATABASE_URL` exit 1 with a message naming the missing variable; no connection is attempted.
+- [ ] `internal/pipeline` does not depend on `net/http`, `database/sql`, `pgx`, or the persistence package, enforced by a test that inspects `go list -deps`.
+- [ ] `internal/pipeline` has a `TestMain` calling `goleak.VerifyTestMain`, and it passes.
+- [ ] `docker compose up --build` starts PostgreSQL with a healthcheck and the app with `serve` only after the database is healthy; `GET /healthz` returns 200; the app container does not run as root (`docker inspect` shows a non-root `User`).
 
 ## T2 — Streaming CSV reader
 
@@ -47,7 +55,7 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 - Owner: human
 - Status: draft
 - ADR: 0002
-- Scope: typed `RowError` and `FileError` with sentinel kinds, first 100 row errors per file plus complete counts per kind, file statuses, file completion via batch count, CLI exit codes.
+- Scope: typed `RowError` and `FileError` with sentinel kinds, first 100 row errors per file plus complete counts per kind, file statuses, file completion via batch count, CLI exit codes. Replaces the T1 "not implemented" stubs so exit 1 only means a `partial` or `failed` file; exit 2 for usage errors is documented next to the ADR 0002 codes in the README.
 
 ### AC
 
@@ -83,7 +91,7 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 - Owner: AI
 - Status: draft
 - ADR: 0004
-- Scope: `goose` SQL migrations embedded in the binary for `jobs`, `job_files`, `row_errors`, `sales_daily`; `migrate` subcommand; persistence package on `pgxpool` writing the final job result in one transaction with `CopyFrom`; integration tests against PostgreSQL.
+- Scope: `goose` SQL migrations embedded in the binary for `jobs`, `job_files`, `row_errors`, `sales_daily`; `migrate` subcommand, run by Compose as a one-shot service that must complete before `app` starts; persistence package on `pgxpool` writing the final job result in one transaction with `CopyFrom`; integration tests against PostgreSQL.
 
 ### AC
 
