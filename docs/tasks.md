@@ -93,11 +93,19 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T6 — Progress tracking
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: 0005
 - Scope: counting reader for bytes read, snapshot built by the aggregator every 200 ms and published through `atomic.Pointer`, CLI progress on stderr.
 
 ### AC
+
+- [ ] Progress is opt-in: `RunWithProgress(ctx, cfg, sources, p)` publishes into a `*Progress`, `Run` keeps its current behaviour, and `p.Snapshot()` is safe to call from any goroutine at any time, returning nil before the first publish.
+- [ ] Percentages are byte-based: a source declares its `Size`, each reader counts bytes through a counting reader with one atomic add per `Read`, and the final snapshot reports `BytesRead == Size` for every fully read file and 100% overall. Edge case: a file with `Size == 0` reports no percentage of its own and is left out of the overall byte total.
+- [ ] A slowed run (sources released row by row) produces at least 3 intermediate snapshots, published no more often than the configured interval, in which `BytesRead`, `Valid`, `Invalid`, and `FilesDone` never decrease.
+- [ ] Every snapshot is internally consistent: the per-file valid and invalid counts sum to the snapshot's totals, and `FilesDone` equals the number of files with a final status. Checked on snapshots read concurrently while the run is in progress, under `-race`.
+- [ ] Before `RunWithProgress` returns it publishes a final snapshot (`Final == true`) whose per-file statuses, counts, and totals equal the returned `Result`, including for a cancelled run.
+- [ ] Progress adds no goroutine to the pipeline and no lock or channel send per row: the T3 goroutine bound still holds with progress enabled.
+- [ ] `fileproc run --progress` prints `progress:` lines to stderr (files done/total, percentage, valid, invalid, elapsed) and always ends with one line for the final snapshot; without the flag it prints no progress lines.
 
 ## T7 — Aggregation and CLI output
 
@@ -131,6 +139,6 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 - Owner: AI
 - Status: draft
 - ADR: 0003, 0005
-- Scope: background job runner with a bounded number of concurrent jobs, paths confined to the configured data directory, jobs left `running` marked `failed` on startup; `serve` subcommand with `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/report`, `GET /jobs/{id}/results` on `net/http`; OpenAPI spec in `docs/openapi.yaml`.
+- Scope: background job runner with a bounded number of concurrent jobs, paths confined to the configured data directory, jobs left `running` marked `failed` on startup; `serve` subcommand with `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/report`, `GET /jobs/{id}/results` on `net/http`; OpenAPI spec in `docs/openapi.yaml`. Reports returned over HTTP must not expose absolute server paths from `*os.PathError` (handed over from the T5 review).
 
 ### AC

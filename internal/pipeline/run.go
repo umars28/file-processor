@@ -9,10 +9,12 @@ import (
 	"io/fs"
 	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 type Source struct {
 	ID   FileID
+	Size int64
 	Open func(ctx context.Context) (io.ReadCloser, error)
 }
 
@@ -56,6 +58,10 @@ type fileDone struct {
 }
 
 func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
+	return RunWithProgress(ctx, cfg, sources, nil)
+}
+
+func RunWithProgress(ctx context.Context, cfg Config, sources []Source, p *Progress) (Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -63,6 +69,7 @@ func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
 		return Result{}, err
 	}
 
+	tr := newTracker(p, sources)
 	jobs := make(chan Source)
 	batches := make(chan Batch, cfg.Workers)
 	done := make(chan fileDone, cfg.Readers)
@@ -72,7 +79,7 @@ func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
 
 	var readers sync.WaitGroup
 	for range cfg.Readers {
-		readers.Go(func() { readSources(ctx, cfg, jobs, batches, done) })
+		readers.Go(func() { readSources(ctx, cfg, tr, jobs, batches, done) })
 	}
 
 	var workers sync.WaitGroup
@@ -88,8 +95,10 @@ func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
 		close(results)
 	}()
 
-	totals, states := aggregate(sources, cfg.MaxErrorsPerFile, results, done)
-	return finalize(totals, states, ctx.Err())
+	totals, states := aggregate(sources, cfg.MaxErrorsPerFile, tr, results, done)
+	res, err := finalize(totals, states, ctx.Err())
+	tr.publish(states, res.Totals, true)
+	return res, err
 }
 
 func validateSources(sources []Source) error {
@@ -117,18 +126,18 @@ func feed(ctx context.Context, sources []Source, jobs chan<- Source) {
 	}
 }
 
-func readSources(ctx context.Context, cfg Config, jobs <-chan Source, batches chan<- Batch, done chan<- fileDone) {
+func readSources(ctx context.Context, cfg Config, tr *tracker, jobs <-chan Source, batches chan<- Batch, done chan<- fileDone) {
 	for src := range jobs {
 		if ctx.Err() != nil {
 			return
 		}
-		r := readSource(ctx, cfg, src, batches)
+		r := readSource(ctx, cfg, src, tr.bytes[src.ID], batches)
 		r.cancelled = r.cancelled || (r.err != nil && ctx.Err() != nil)
 		done <- r
 	}
 }
 
-func readSource(ctx context.Context, cfg Config, src Source, batches chan<- Batch) (res fileDone) {
+func readSource(ctx context.Context, cfg Config, src Source, read *atomic.Int64, batches chan<- Batch) (res fileDone) {
 	res.file = src.ID
 	rc, err := src.Open(ctx)
 	if err != nil {
@@ -153,7 +162,7 @@ func readSource(ctx context.Context, cfg Config, src Source, batches chan<- Batc
 			res.closeErr = &FileError{File: src.ID, LastLine: res.stats.LastLine, Err: fmt.Errorf("close: %w", closeErr)}
 		}
 	}()
-	res.stats, res.err = ReadCSV(ctx, src.ID, rc, cfg, batches)
+	res.stats, res.err = ReadCSV(ctx, src.ID, byteCounter{r: rc, n: read}, cfg, batches)
 	return res
 }
 
@@ -185,7 +194,7 @@ func (f *fileState) done() bool {
 	return f.finished && !f.cancelled && f.received == f.expected
 }
 
-func aggregate(sources []Source, maxErrors int, results <-chan txBatch, done <-chan fileDone) (Totals, []*fileState) {
+func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBatch, done <-chan fileDone) (Totals, []*fileState) {
 	files := make(map[FileID]*fileState, len(sources))
 	states := make([]*fileState, 0, len(sources))
 	for _, src := range sources {
@@ -197,8 +206,12 @@ func aggregate(sources []Source, maxErrors int, results <-chan txBatch, done <-c
 		states = append(states, f)
 	}
 	var totals Totals
+	tick, stop := tr.ticks()
+	defer stop()
 	for results != nil || done != nil {
 		select {
+		case <-tick:
+			tr.publish(states, totals, false)
 		case b, ok := <-results:
 			if !ok {
 				results = nil
