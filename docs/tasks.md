@@ -110,18 +110,26 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T7 — Aggregation and CLI output
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: 0001, 0003
 - Scope: sales aggregated per outlet, product, and day; deterministic results regardless of scheduling; `run` subcommand prints results and reports as JSON.
 
 ### AC
+
+- [ ] `Result.Daily` holds one entry per (sale date, outlet, product) with transaction count, quantity, and amount as `int64`, and equals a map computed independently from the generated input, for `(readers, workers)` of `(1, 1)` and `(4, 8)`. The entries sum to `Result.Totals`.
+- [ ] `Result.Daily` is sorted by date, then outlet, then product, and is identical across 20 runs with `(4, 8)`.
+- [ ] Edge case: the sale date is the calendar date in the offset written in the record. `2026-10-30T23:59:59+07:00` and `2026-10-31T00:00:00+07:00` land on different dates, and `2026-10-31T01:00:00+07:00` lands on 2026-10-31 while the same instant written as `2026-10-30T18:00:00Z` lands on 2026-10-30.
+- [ ] Rows from a `partial` file are in `Daily`; a cancelled run returns an empty `Daily` (ADR 0001).
+- [ ] Aggregation memory grows with the number of distinct (date, outlet, product) keys, not with rows: 200 sources of 10,000 rows over 25,000 keys keep `HeapAlloc` below 64 MB.
+- [ ] `fileproc run` writes one JSON document to stdout with `status` (`completed` or `cancelled`), `totals`, `daily`, and `files` (path, status, valid, invalid, error counts, kept errors with line, column, kind, and message, file error, last line). Amounts are JSON integers. The stderr summary from T5 is unchanged.
+- [ ] Failure case: stdout is still a single valid JSON document when a file fails (exit 1) and when the run is cancelled (exit 130, `status` `cancelled`, empty `daily`).
 
 ## T8 — Benchmarks, data generator, README
 
 - Owner: AI
 - Status: draft
 - ADR: -
-- Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), CLI exit codes 0/1/2/130 next to the ADR 0002 statuses, time from cancel to return under a realistic aggregator cost (ADR 0001, 200 ms target from T4), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
+- Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), CLI exit codes 0/1/2/130 next to the ADR 0002 statuses, known limitations including unchecked `int64` overflow of summed quantity and amount (handed over from the T7 review), time from cancel to return under a realistic aggregator cost (ADR 0001, 200 ms target from T4), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
 
 ### AC
 
@@ -139,6 +147,6 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 - Owner: AI
 - Status: draft
 - ADR: 0003, 0005
-- Scope: background job runner with a bounded number of concurrent jobs, paths confined to the configured data directory, jobs left `running` marked `failed` on startup; `serve` subcommand with `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/report`, `GET /jobs/{id}/results` on `net/http`; OpenAPI spec in `docs/openapi.yaml`. Reports returned over HTTP must not expose absolute server paths from `*os.PathError` (handed over from the T5 review).
+- Scope: background job runner with a bounded number of concurrent jobs, paths confined to the configured data directory, jobs left `running` marked `failed` on startup; `serve` subcommand with `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/report`, `GET /jobs/{id}/results` on `net/http`; OpenAPI spec in `docs/openapi.yaml`. Reports returned over HTTP must not expose absolute server paths from `*os.PathError`, in `path`, `error`, or `close_error` (handed over from the T5 and T7 reviews). Jobs must cap the number of distinct (date, outlet, product) keys, because a client-supplied file with a unique key per row grows the aggregator map without bound (handed over from the T7 review).
 
 ### AC

@@ -40,6 +40,7 @@ type FileResult struct {
 
 type Result struct {
 	Totals Totals
+	Daily  []DailySales
 	Files  []FileResult
 }
 
@@ -95,8 +96,8 @@ func RunWithProgress(ctx context.Context, cfg Config, sources []Source, p *Progr
 		close(results)
 	}()
 
-	totals, states := aggregate(sources, cfg.MaxErrorsPerFile, tr, results, done)
-	res, err := finalize(totals, states, ctx.Err())
+	sum, states := aggregate(sources, cfg.MaxErrorsPerFile, tr, results, done)
+	res, err := finalize(sum, states, ctx.Err())
 	tr.publish(states, res.Totals, true)
 	return res, err
 }
@@ -194,7 +195,7 @@ func (f *fileState) done() bool {
 	return f.finished && !f.cancelled && f.received == f.expected
 }
 
-func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBatch, done <-chan fileDone) (Totals, []*fileState) {
+func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBatch, done <-chan fileDone) (*sums, []*fileState) {
 	files := make(map[FileID]*fileState, len(sources))
 	states := make([]*fileState, 0, len(sources))
 	for _, src := range sources {
@@ -205,13 +206,13 @@ func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBa
 		files[src.ID] = f
 		states = append(states, f)
 	}
-	var totals Totals
+	sum := newSums()
 	tick, stop := tr.ticks()
 	defer stop()
 	for results != nil || done != nil {
 		select {
 		case <-tick:
-			tr.publish(states, totals, false)
+			tr.publish(states, sum.totals, false)
 		case b, ok := <-results:
 			if !ok {
 				results = nil
@@ -226,9 +227,7 @@ func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBa
 				f.kept.add(e)
 			}
 			for _, tx := range b.txs {
-				totals.Transactions++
-				totals.Quantity += tx.Quantity
-				totals.Amount += tx.Amount
+				sum.add(tx)
 			}
 		case d, ok := <-done:
 			if !ok {
@@ -247,11 +246,11 @@ func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBa
 			f.result.CloseErr = d.closeErr
 		}
 	}
-	return totals, states
+	return sum, states
 }
 
-func finalize(totals Totals, states []*fileState, ctxErr error) (Result, error) {
-	res := Result{Totals: totals, Files: make([]FileResult, 0, len(states))}
+func finalize(sum *sums, states []*fileState, ctxErr error) (Result, error) {
+	res := Result{Totals: sum.totals, Daily: []DailySales{}, Files: make([]FileResult, 0, len(states))}
 	cancelled := false
 	for _, f := range states {
 		f.result.Done = f.done()
@@ -263,6 +262,7 @@ func finalize(totals Totals, states []*fileState, ctxErr error) (Result, error) 
 	}
 	slices.SortFunc(res.Files, func(a, b FileResult) int { return cmp.Compare(a.ID, b.ID) })
 	if !cancelled {
+		res.Daily = sum.sortedDaily()
 		return res, nil
 	}
 	res.Totals = Totals{}
