@@ -13,6 +13,7 @@ type Config struct {
 	Workers          int
 	BatchSize        int
 	MaxErrorsPerFile int
+	MaxRecordBytes   int
 }
 
 func DefaultConfig() Config {
@@ -21,6 +22,7 @@ func DefaultConfig() Config {
 		Workers:          runtime.NumCPU(),
 		BatchSize:        512,
 		MaxErrorsPerFile: 100,
+		MaxRecordBytes:   64 << 10,
 	}
 }
 
@@ -37,6 +39,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxErrorsPerFile < 0 {
 		errs = append(errs, fmt.Errorf("%w: max errors per file must not be negative, got %d", ErrInvalidConfig, c.MaxErrorsPerFile))
+	}
+	if c.MaxRecordBytes < 1 {
+		errs = append(errs, fmt.Errorf("%w: max record bytes must be at least 1, got %d", ErrInvalidConfig, c.MaxRecordBytes))
 	}
 	return errors.Join(errs...)
 }
