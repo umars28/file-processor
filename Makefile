@@ -1,9 +1,13 @@
 COVERAGE_MIN ?= 80
+TEST_DATABASE_URL ?= postgres://fileproc:$${POSTGRES_PASSWORD:-fileproc}@127.0.0.1:$${POSTGRES_PORT:-55432}/fileproc?sslmode=disable
 
-.PHONY: test cover lint vuln secrets check hooks
+.PHONY: test test-integration cover lint vuln secrets check hooks
 
 test:
-	go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+test-integration:
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -count=1 -v ./internal/store/...
 
 cover: test
 	go tool cover -func=coverage.out | tee coverage.txt

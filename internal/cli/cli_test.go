@@ -413,13 +413,14 @@ func TestMissingDatabaseURL(t *testing.T) {
 	}
 }
 
-func TestMigrateNotImplementedYet(t *testing.T) {
-	code, _, stderr := run(t, t.Context(), withDB, "migrate")
+func TestMigrateUnreachableDatabase(t *testing.T) {
+	unreachable := env(map[string]string{"DATABASE_URL": "postgres://user@127.0.0.1:1/db?connect_timeout=1"})
+	code, _, stderr := run(t, t.Context(), unreachable, "migrate")
 	if code != exitError {
 		t.Fatalf("exit = %d, want %d", code, exitError)
 	}
-	if !strings.Contains(stderr, "not implemented") {
-		t.Fatalf("stderr = %q", stderr)
+	if !strings.Contains(stderr, "migrate: ") {
+		t.Fatalf("stderr = %q, want a migrate error", stderr)
 	}
 }
 

@@ -136,11 +136,19 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T9 — Database schema, migrations, persistence
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: 0004
 - Scope: `goose` SQL migrations embedded in the binary for `jobs`, `job_files`, `row_errors`, `sales_daily`; `migrate` subcommand, run by Compose as a one-shot service that must complete before `app` starts; persistence package on `pgxpool` writing the final job result in one transaction with `CopyFrom`; integration tests against PostgreSQL.
 
 ### AC
+
+- [ ] `fileproc migrate` applies the embedded migrations to an empty database and creates `jobs`, `job_files`, `row_errors`, and `sales_daily` with the ADR 0004 constraints: a `CHECK` on job and file status, foreign keys with `ON DELETE CASCADE`, unique `(job_id, path)`, and the `sales_daily` primary key. Running it a second time changes nothing and exits 0.
+- [ ] Compose runs `migrate` as a one-shot service; `app` starts only after it completed successfully. `docker compose up --build` on a fresh volume gives `GET /healthz` 200 and all four tables present.
+- [ ] Round trip: a job created with `CreateJob`, marked running, and saved with `SaveResult` reads back through the store's read queries with the same job status, per-file status, counts, per-kind error counts, kept row errors, file errors, and daily rows. Amounts near `math.MaxInt64` survive unchanged.
+- [ ] Failure case: when any statement inside `SaveResult` fails, nothing from that call is visible afterwards: no `job_files`, `row_errors`, or `sales_daily` rows for the job, and the job keeps its previous status.
+- [ ] A cancelled result is saved with job status `cancelled`, its file reports and errors, and zero `sales_daily` rows.
+- [ ] Startup recovery: `FailUnfinishedJobs` marks every `queued` or `running` job as `failed` with an explanatory error and returns how many it changed; finished jobs are untouched.
+- [ ] `SaveResult` writes 25,000 daily rows plus 100 files with 100 row errors each in under 2 seconds against a local PostgreSQL, using `CopyFrom`. Every store query has an integration test; those tests skip with a clear message when `TEST_DATABASE_URL` is unset, and `make test-integration` runs them against the Compose database.
 
 ## T10 — Job runner, HTTP API, OpenAPI
 
