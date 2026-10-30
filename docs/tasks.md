@@ -153,8 +153,16 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T10 — Job runner, HTTP API, OpenAPI
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: 0003, 0005
 - Scope: background job runner with a bounded number of concurrent jobs, paths confined to the configured data directory, jobs left `running` marked `failed` on startup; `serve` subcommand with `POST /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/report`, `GET /jobs/{id}/results` on `net/http`; OpenAPI spec in `docs/openapi.yaml`. Reports returned over HTTP must not expose absolute server paths from `*os.PathError`, in `path`, `error`, or `close_error` (handed over from the T5 and T7 reviews). Jobs must cap the number of distinct (date, outlet, product) keys, because a client-supplied file with a unique key per row grows the aggregator map without bound (handed over from the T7 review).
 
 ### AC
+
+- [ ] `POST /jobs` with `{"files": [...]}` (paths relative to `DATA_DIR`) answers `202` with `{"id", "status": "queued"}` and a `Location` header. Failure cases answer `400` with an `application/problem+json` body: an empty list, more than 100 files, duplicate paths, an absolute path, a path containing `..`, a symlink that leaves the data directory, or a malformed body. A body over 1 MiB answers `413`; a full job queue answers `503` with `Retry-After`. A file that does not exist is not a `400`; the job runs and reports that file as `failed`.
+- [ ] At most `--max-jobs` jobs run at the same time (default 2), measured while more are queued; queued jobs start in submission order. Each job moves `queued` → `running` → `completed`, `cancelled`, or `failed` in the store, and a failure to save its result marks it `failed`.
+- [ ] `GET /jobs/{id}` returns the job's status and timestamps and, while it runs, a `progress` object from the live snapshot (files done of total, percentage, valid, invalid). An unknown or malformed ID answers `404` problem JSON.
+- [ ] `GET /jobs/{id}/report` and `GET /jobs/{id}/results` answer `409` while the job is queued or running. Afterwards they return the same `files`, `totals`, and `daily` shapes as `fileproc run`; for a cancelled job the report is present and the results are empty. End-to-end against the Compose database, the results of a job equal the CLI output for the same files.
+- [ ] No response body, including `path`, `error`, and `close_error` in reports, contains the absolute data directory. A job whose files produce more than `--max-daily-keys` distinct (date, outlet, product) keys (default 1,000,000) fails with a clear error instead of growing memory without bound.
+- [ ] Lifecycle: on start, jobs left `queued` or `running` by a previous process are marked `failed`. On `SIGTERM` the server stops accepting requests, cancels running jobs, saves them as `cancelled`, and exits 0 within its shutdown timeout.
+- [ ] `docs/openapi.yaml` (OpenAPI 3.1) documents every route with request, response, and problem schemas, and is served at `GET /openapi.yaml`. A test fails if a route registered on the server is missing from the spec.

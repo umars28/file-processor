@@ -14,6 +14,7 @@ type Config struct {
 	BatchSize        int
 	MaxErrorsPerFile int
 	MaxRecordBytes   int
+	MaxDailyKeys     int
 }
 
 func DefaultConfig() Config {
@@ -39,6 +40,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxErrorsPerFile < 0 {
 		errs = append(errs, fmt.Errorf("%w: max errors per file must not be negative, got %d", ErrInvalidConfig, c.MaxErrorsPerFile))
+	}
+	if c.MaxDailyKeys < 0 {
+		errs = append(errs, fmt.Errorf("%w: max daily keys must not be negative, got %d", ErrInvalidConfig, c.MaxDailyKeys))
 	}
 	if c.MaxRecordBytes < 1 {
 		errs = append(errs, fmt.Errorf("%w: max record bytes must be at least 1, got %d", ErrInvalidConfig, c.MaxRecordBytes))

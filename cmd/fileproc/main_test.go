@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/umars28/file-processor/internal/testdb"
 )
 
 type syncBuffer struct {
@@ -47,12 +49,24 @@ func TestServeStopsOnSignal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the binary")
 	}
+	url, err := testdb.URL(t.Context(), "test_cmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is not set; start the Compose database and use make test")
+	}
 	bin := buildBinary(t)
+	migrate := exec.CommandContext(t.Context(), bin, "migrate")
+	migrate.Env = append(os.Environ(), "DATABASE_URL="+url)
+	if out, err := migrate.CombinedOutput(); err != nil {
+		t.Fatalf("migrate: %v\n%s", err, out)
+	}
 	for name, sig := range map[string]syscall.Signal{"SIGINT": syscall.SIGINT, "SIGTERM": syscall.SIGTERM} {
 		t.Run(name, func(t *testing.T) {
 			stderr := &syncBuffer{}
 			cmd := exec.CommandContext(t.Context(), bin, "serve", "-addr", "127.0.0.1:0")
-			cmd.Env = append(os.Environ(), "DATABASE_URL=postgres://user@localhost/db")
+			cmd.Env = append(os.Environ(), "DATABASE_URL="+url, "DATA_DIR="+t.TempDir())
 			cmd.Stderr = stderr
 			if err := cmd.Start(); err != nil {
 				t.Fatalf("start: %v", err)

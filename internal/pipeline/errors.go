@@ -15,6 +15,7 @@ var (
 	ErrInvalidDate    = errors.New("invalid date")
 	ErrHeaderMismatch = errors.New("header mismatch")
 	ErrRecordTooLarge = errors.New("record too large")
+	ErrTooManyKeys    = errors.New("too many distinct daily keys")
 )
 
 type FieldError struct {
