@@ -127,11 +127,19 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T8 — Benchmarks, data generator, README
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: -
 - Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), CLI exit codes 0/1/2/130 next to the ADR 0002 statuses, known limitations including unchecked `int64` overflow of summed quantity and amount (handed over from the T7 review), time from cancel to return under a realistic aggregator cost (ADR 0001, 200 ms target from T4), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
 
 ### AC
+
+- [ ] `cmd/gendata` writes a valid POS sales CSV with flags for rows, outlets, products, days, invalid-row rate, and seed. The same flags and seed produce byte-identical output, and generating 10,000,000 rows keeps `HeapAlloc` below 32 MB.
+- [ ] Edge case: with an invalid-row rate set, the generator reports how many invalid rows it wrote per error kind, and `fileproc run` on that file reports exactly the same counts.
+- [ ] `make bench` runs benchmarks for each stage (reader, row conversion, aggregation) and for the whole pipeline, reporting throughput in MB/s and allocations per operation.
+- [ ] A cancellation measurement runs the pipeline with a realistic aggregator (at least 100,000 distinct daily keys) and reports the median and worst cancel-to-return time over at least 50 cancels; the worst case is below the 200 ms target from T4.
+- [ ] `README.md` covers every deliverable from the brief: setup and running (Docker Compose and local), architecture with a diagram of the pipeline and the components, technology choices linked to the ADRs, the database schema, the HTTP API with a link to `docs/openapi.yaml`, CLI usage with the exit codes 0/1/2/130 next to the file statuses, a test coverage report per package from the latest `make cover`, known limitations, future improvements, and an `AI Usage` section summarising `docs/ai-log.md`.
+- [ ] Known limitations list at least: unchecked `int64` overflow of summed quantity and amount in the pipeline, no authentication, no file upload, no resume after a restart, duplicate transactions are not deduplicated, and a single-node job runner.
+- [ ] Failure case: every command in the README's quick start and CLI sections is run once before the PR, and any command that does not work as written is fixed or removed.
 
 ## T9 — Database schema, migrations, persistence
 

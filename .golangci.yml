@@ -21,7 +21,11 @@ linters:
       - path: _test\.go$
         linters:
           - gosec
-        text: "^G(204|404):"
+        text: "^G(204|304|404):"
+      - path: ^internal/gendata/
+        linters:
+          - gosec
+        text: "^G404:"
 
 formatters:
   enable:
