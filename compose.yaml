@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: fileproc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fileproc}
+      POSTGRES_DB: fileproc
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fileproc -d fileproc"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  app:
+    build: .
+    command: ["serve"]
+    environment:
+      DATABASE_URL: postgres://fileproc:${POSTGRES_PASSWORD:-fileproc}@db:5432/fileproc?sslmode=disable
+      HTTP_ADDR: ":8080"
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
