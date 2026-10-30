@@ -4,31 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"time"
 )
 
-const (
+var (
 	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 60 * time.Second
+	idleTimeout       = 120 * time.Second
 	shutdownTimeout   = 10 * time.Second
 )
 
-func NewHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"status":"ok"}`)
-	})
-	return mux
-}
+const maxHeaderBytes = 64 << 10
 
 func Serve(ctx context.Context, ln net.Listener, h http.Handler) error {
 	srv := &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+		BaseContext:       func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

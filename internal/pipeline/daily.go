@@ -31,12 +31,14 @@ type dayKey struct {
 }
 
 type sums struct {
-	totals Totals
-	daily  map[dayKey]*DailySales
+	totals     Totals
+	daily      map[dayKey]*DailySales
+	maxKeys    int
+	overflowed bool
 }
 
-func newSums() *sums {
-	return &sums{daily: map[dayKey]*DailySales{}}
+func newSums(maxKeys int) *sums {
+	return &sums{daily: map[dayKey]*DailySales{}, maxKeys: maxKeys}
 }
 
 func (s *sums) add(tx Transaction) {
@@ -48,6 +50,10 @@ func (s *sums) add(tx Transaction) {
 	key := dayKey{year: y, month: m, day: day, outletID: tx.OutletID, productID: tx.ProductID}
 	d, ok := s.daily[key]
 	if !ok {
+		if s.maxKeys > 0 && len(s.daily) >= s.maxKeys {
+			s.overflowed = true
+			return
+		}
 		key.outletID = strings.Clone(key.outletID)
 		key.productID = strings.Clone(key.productID)
 		d = &DailySales{DailyKey: DailyKey{

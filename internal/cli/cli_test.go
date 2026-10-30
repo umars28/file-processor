@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/umars28/file-processor/internal/pipeline"
+	"github.com/umars28/file-processor/internal/store"
+	"github.com/umars28/file-processor/internal/testdb"
 	"go.uber.org/goleak"
 )
 
@@ -452,13 +455,26 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
+func serveEnv(t *testing.T, dataDir string) func(string) string {
+	t.Helper()
+	url, err := testdb.URL(t.Context(), "test_cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL is not set; start the Compose database and use make test")
+	}
+	return env(map[string]string{"DATABASE_URL": url, "DATA_DIR": dataDir})
+}
+
 func TestServeStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan int, 1)
 	stderr := &syncBuffer{}
+	getenv := serveEnv(t, t.TempDir())
 	go func() {
-		done <- Run(ctx, []string{"serve", "-addr", "127.0.0.1:0"}, &bytes.Buffer{}, stderr, withDB)
+		done <- Run(ctx, []string{"serve", "-addr", "127.0.0.1:0"}, &bytes.Buffer{}, stderr, getenv)
 	}()
 	waitFor(t, func() bool { return strings.Contains(stderr.String(), "listening") })
 	cancel()
@@ -481,4 +497,162 @@ func TestServeInvalidAddress(t *testing.T) {
 	if !strings.Contains(stderr, "serve:") {
 		t.Fatalf("stderr = %q", stderr)
 	}
+}
+
+type liveServer struct {
+	base   string
+	client *http.Client
+	stop   func() int
+}
+
+func startServer(t *testing.T, getenv func(string) string) *liveServer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	stderr := &syncBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{"serve", "-addr", "127.0.0.1:0", "-max-jobs", "2"}, &bytes.Buffer{}, stderr, getenv)
+	}()
+	var addr string
+	waitFor(t, func() bool {
+		for _, line := range strings.Split(stderr.String(), "\n") {
+			if i := strings.Index(line, "msg=listening addr="); i >= 0 {
+				addr = strings.Fields(line[i+len("msg=listening addr="):])[0]
+				return true
+			}
+		}
+		return false
+	})
+	srv := &liveServer{base: "http://" + addr, client: &http.Client{Timeout: 5 * time.Second}}
+	var once sync.Once
+	code := 0
+	srv.stop = func() int {
+		once.Do(func() {
+			cancel()
+			select {
+			case code = <-done:
+			case <-time.After(10 * time.Second):
+				t.Errorf("serve did not stop; stderr: %s", stderr.String())
+			}
+		})
+		return code
+	}
+	t.Cleanup(func() { srv.stop() })
+	return srv
+}
+
+func (s *liveServer) call(t *testing.T, method, path, body string, out any) int {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, s.base+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("%s %s: decode: %v", method, path, err)
+		}
+	}
+	return resp.StatusCode
+}
+
+func TestServeEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	writeCSV(t, dir, "a.csv", csvHeader+
+		"t1,o1,p1,2,5000,2026-10-30T09:00:00+07:00\n"+
+		"t2,o1,p1,1,2500,2026-10-30T20:00:00+07:00\n"+
+		"t3,o1,p1,x,1,2026-10-30T09:00:00+07:00\n")
+	writeCSV(t, dir, "b.csv", csvHeader+"t4,o2,p9,3,9000,2026-10-31T01:00:00+07:00\n")
+	getenv := serveEnv(t, dir)
+
+	st, err := store.Open(t.Context(), getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	stale, _ := st.CreateJob(t.Context())
+	if err := st.MarkRunning(t.Context(), stale); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := startServer(t, getenv)
+
+	var staleJob struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if code := srv.call(t, http.MethodGet, "/jobs/"+stale, "", &staleJob); code != http.StatusOK || staleJob.Status != "failed" || !strings.Contains(staleJob.Error, "restarted") {
+		t.Fatalf("job left running by a previous process = %d %+v, want failed on start", code, staleJob)
+	}
+
+	var created struct{ ID, Status string }
+	if code := srv.call(t, http.MethodPost, "/jobs", `{"files": ["a.csv", "b.csv", "missing.csv"]}`, &created); code != http.StatusAccepted || created.Status != "queued" {
+		t.Fatalf("POST /jobs = %d %+v", code, created)
+	}
+	if code := srv.call(t, http.MethodPost, "/jobs", `{"files": ["../etc/passwd"]}`, nil); code != http.StatusBadRequest {
+		t.Fatalf("POST with a path outside the data directory = %d, want 400", code)
+	}
+
+	var job struct{ Status string }
+	waitFor(t, func() bool {
+		srv.call(t, http.MethodGet, "/jobs/"+created.ID, "", &job)
+		return job.Status == "completed"
+	})
+
+	var results struct {
+		Totals json.RawMessage `json:"totals"`
+		Daily  json.RawMessage `json:"daily"`
+	}
+	if code := srv.call(t, http.MethodGet, "/jobs/"+created.ID+"/results", "", &results); code != http.StatusOK {
+		t.Fatalf("GET results = %d", code)
+	}
+	var rep struct {
+		Files []struct {
+			Path, Status, Error string
+		} `json:"files"`
+	}
+	if code := srv.call(t, http.MethodGet, "/jobs/"+created.ID+"/report", "", &rep); code != http.StatusOK {
+		t.Fatalf("GET report = %d", code)
+	}
+
+	_, cliOut, _ := run(t, t.Context(), env(nil), "run", filepath.Join(dir, "a.csv"), filepath.Join(dir, "b.csv"), filepath.Join(dir, "missing.csv"))
+	var cli struct {
+		Totals json.RawMessage           `json:"totals"`
+		Daily  json.RawMessage           `json:"daily"`
+		Files  []struct{ Status string } `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(cliOut), &cli); err != nil {
+		t.Fatalf("CLI output: %v", err)
+	}
+	if compactJSON(t, results.Totals) != compactJSON(t, cli.Totals) || compactJSON(t, results.Daily) != compactJSON(t, cli.Daily) {
+		t.Fatalf("HTTP results %s %s differ from CLI %s %s", results.Totals, results.Daily, cli.Totals, cli.Daily)
+	}
+	for i, f := range rep.Files {
+		if f.Status != cli.Files[i].Status {
+			t.Fatalf("file %d status: HTTP %s, CLI %s", i, f.Status, cli.Files[i].Status)
+		}
+		if strings.Contains(f.Path+f.Error, dir) {
+			t.Fatalf("report exposes the data directory: %+v", f)
+		}
+	}
+	if rep.Files[2].Path != "missing.csv" || rep.Files[2].Status != "failed" {
+		t.Fatalf("missing file = %+v, want failed", rep.Files[2])
+	}
+
+	if code := srv.stop(); code != exitOK {
+		t.Fatalf("serve exit = %d, want %d", code, exitOK)
+	}
+}
+
+func compactJSON(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }

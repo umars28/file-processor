@@ -28,7 +28,7 @@ Majoo take-home, Test Case 1: concurrent CSV processor in Go. Data: POS sales tr
 - Write tests first, then the implementation.
 - Every package that starts goroutines must call `goleak.VerifyTestMain(m)` (`go.uber.org/goleak`) in its `TestMain`.
 - `make check` must pass before a task is reported as finished.
-- Never run two test commands against the shared Compose database at the same time; `FailUnfinishedJobs` in one run fails the jobs of the other.
+- Each DB-backed test package uses its own PostgreSQL schema (`test_store`, `test_cli`, `test_cmd`), so packages can run in parallel. Two simultaneous runs of the same package still share a schema; don't overlap them.
 
 ## Commands
 

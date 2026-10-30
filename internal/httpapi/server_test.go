@@ -19,7 +19,7 @@ func TestMain(m *testing.M) {
 func TestHealthz(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
-	NewHandler().ServeHTTP(rec, req)
+	NewHandler(nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -35,10 +35,13 @@ func TestHealthz(t *testing.T) {
 func TestHealthzRejectsOtherMethods(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/healthz", nil)
-	NewHandler().ServeHTTP(rec, req)
+	NewHandler(nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
+		t.Fatalf("Content-Type = %q, want application/problem+json", ct)
 	}
 }
 
@@ -49,7 +52,7 @@ func TestServeStopsOnContextCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, NewHandler()) }()
+	go func() { done <- Serve(ctx, ln, NewHandler(nil)) }()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+ln.Addr().String()+"/healthz", nil)
 	if err != nil {
@@ -84,7 +87,42 @@ func TestServeReturnsErrorWhenListenerClosed(t *testing.T) {
 	}
 	_ = ln.Close()
 
-	if err := Serve(t.Context(), ln, NewHandler()); err == nil {
+	if err := Serve(t.Context(), ln, NewHandler(nil)); err == nil {
 		t.Fatal("Serve() = nil, want error for closed listener")
+	}
+}
+
+func TestServeDropsSlowBodies(t *testing.T) {
+	old := readTimeout
+	readTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { readTimeout = old })
+
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, ln, NewHandler(nil)) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "POST /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n{"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, _ = io.ReadAll(conn)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("server kept a slow body connection open for %v, want it closed after the read timeout", d)
 	}
 }

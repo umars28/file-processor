@@ -6,26 +6,53 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	neturl "net/url"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/umars28/file-processor/internal/report"
 	"go.uber.org/goleak"
 )
 
-var testURL = os.Getenv("TEST_DATABASE_URL")
+var testURL string
 
 func TestMain(m *testing.M) {
-	if testURL != "" {
-		var log bytes.Buffer
-		if err := Migrate(context.Background(), testURL, &log); err != nil {
-			fmt.Fprintf(os.Stderr, "migrate test database: %v\n%s", err, log.String())
+	if os.Getenv("TEST_DATABASE_URL") != "" {
+		url, err := scopedURL(context.Background(), "test_store")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "prepare test database: %v\n", err)
 			os.Exit(1)
 		}
+		testURL = url
 	}
 	goleak.VerifyTestMain(m)
+}
+
+func scopedURL(ctx context.Context, schema string) (string, error) {
+	conn, err := pgx.Connect(ctx, os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		return "", err
+	}
+	u, err := neturl.Parse(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	var log bytes.Buffer
+	if err := Migrate(ctx, u.String(), &log); err != nil {
+		return "", fmt.Errorf("%w\n%s", err, log.String())
+	}
+	return u.String(), nil
 }
 
 func openStore(t *testing.T) *Store {

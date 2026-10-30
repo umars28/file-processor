@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -225,4 +226,31 @@ func TestRunDailyMemoryGrowsWithKeysNotRows(t *testing.T) {
 		t.Fatalf("peak HeapAlloc = %d MB, want below 64 MB", highest>>20)
 	}
 	t.Logf("peak HeapAlloc %.1f MB for %d keys", float64(highest)/(1<<20), len(res.Daily))
+}
+
+func TestRunStopsWhenDailyKeysExceedTheCap(t *testing.T) {
+	var sources []Source
+	for i := range 20 {
+		sources = append(sources, Source{ID: FileID(i), Open: func(context.Context) (io.ReadCloser, error) {
+			return io.NopCloser(&keyedGenerator{base: i * 50_000, rows: 50_000}), nil
+		}})
+	}
+	cfg := runConfig(4, 4)
+	cfg.MaxDailyKeys = 1000
+	start := time.Now()
+	res, err := Run(t.Context(), cfg, sources)
+	if !errors.Is(err, ErrTooManyKeys) {
+		t.Fatalf("Run() error = %v, want ErrTooManyKeys", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Run took %v after hitting the cap, want it to stop early", d)
+	}
+	if res.Totals != (Totals{}) || len(res.Daily) != 0 {
+		t.Fatalf("result after overflow = %+v totals, %d daily, want none", res.Totals, len(res.Daily))
+	}
+
+	cfg.MaxDailyKeys = 25_000
+	if _, err := Run(t.Context(), cfg, sources[:1]); err != nil {
+		t.Fatalf("Run() under the cap: %v", err)
+	}
 }

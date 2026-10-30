@@ -16,6 +16,7 @@ import (
 
 	"github.com/umars28/file-processor/internal/config"
 	"github.com/umars28/file-processor/internal/httpapi"
+	"github.com/umars28/file-processor/internal/jobs"
 	"github.com/umars28/file-processor/internal/pipeline"
 	"github.com/umars28/file-processor/internal/report"
 	"github.com/umars28/file-processor/internal/store"
@@ -234,8 +235,13 @@ func printFileSummary(w io.Writer, path string, f pipeline.FileResult) {
 }
 
 func serveCmd(ctx context.Context, args []string, stderr io.Writer, getenv func(string) string) int {
+	pcfg := pipeline.DefaultConfig()
+	pcfg.MaxDailyKeys = 1_000_000
 	fs := newFlagSet("serve", "[flags]", stderr)
 	addr := fs.String("addr", "", "listen address (default $HTTP_ADDR or :8080)")
+	maxJobs := fs.Int("max-jobs", 2, "jobs processed at the same time")
+	queueSize := fs.Int("queue-size", 100, "jobs waiting to start before new submissions get 503")
+	fs.IntVar(&pcfg.MaxDailyKeys, "max-daily-keys", pcfg.MaxDailyKeys, "distinct (date, outlet, product) keys a job may produce before it fails; 0 means no limit")
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
@@ -247,15 +253,51 @@ func serveCmd(ctx context.Context, args []string, stderr io.Writer, getenv func(
 	if *addr != "" {
 		cfg.HTTPAddr = *addr
 	}
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.HTTPAddr)
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: %v\n", err)
 		return exitError
 	}
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
-	logger.Info("listening", "addr", ln.Addr().String())
-	if err := httpapi.Serve(ctx, ln, httpapi.NewHandler()); err != nil {
+	st, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		_ = ln.Close()
 		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return exitError
+	}
+	defer st.Close()
+	if n, err := st.FailUnfinishedJobs(ctx, "server restarted before the job finished"); err != nil {
+		_ = ln.Close()
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return exitError
+	} else if n > 0 {
+		logger.Warn("marked unfinished jobs as failed", "jobs", n)
+	}
+	runner, err := jobs.New(st, jobs.Options{
+		DataDir:          cfg.DataDir,
+		Pipeline:         pcfg,
+		MaxJobs:          *maxJobs,
+		QueueSize:        *queueSize,
+		ProgressInterval: pipeline.DefaultProgressInterval,
+		Logger:           logger,
+	})
+	if err != nil {
+		_ = ln.Close()
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return exitError
+	}
+	runCtx, stopRunner := context.WithCancel(ctx)
+	defer stopRunner()
+	runner.Start(runCtx)
+
+	logger.Info("listening", "addr", ln.Addr().String(), "data_dir", cfg.DataDir)
+	handler := httpapi.NewHandler(&httpapi.API{Jobs: runner, Store: st, DataDir: cfg.DataDir, Logger: logger})
+	serveErr := httpapi.Serve(ctx, ln, handler)
+	stopRunner()
+	runner.Wait(ctx)
+	if serveErr != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", serveErr)
 		return exitError
 	}
 	logger.Info("stopped")

@@ -70,17 +70,19 @@ func RunWithProgress(ctx context.Context, cfg Config, sources []Source, p *Progr
 		return Result{}, err
 	}
 
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	tr := newTracker(p, sources)
 	jobs := make(chan Source)
 	batches := make(chan Batch, cfg.Workers)
 	done := make(chan fileDone, cfg.Readers)
 	results := make(chan txBatch, cfg.Workers)
 
-	go feed(ctx, sources, jobs)
+	go feed(runCtx, sources, jobs)
 
 	var readers sync.WaitGroup
 	for range cfg.Readers {
-		readers.Go(func() { readSources(ctx, cfg, tr, jobs, batches, done) })
+		readers.Go(func() { readSources(runCtx, cfg, tr, jobs, batches, done) })
 	}
 
 	var workers sync.WaitGroup
@@ -96,8 +98,13 @@ func RunWithProgress(ctx context.Context, cfg Config, sources []Source, p *Progr
 		close(results)
 	}()
 
-	sum, states := aggregate(sources, cfg.MaxErrorsPerFile, tr, results, done)
-	res, err := finalize(sum, states, ctx.Err())
+	sum := newSums(cfg.MaxDailyKeys)
+	states := aggregate(sources, cfg.MaxErrorsPerFile, sum, cancel, tr, results, done)
+	var cause error
+	if runCtx.Err() != nil {
+		cause = context.Cause(runCtx)
+	}
+	res, err := finalize(sum, states, cause)
 	tr.publish(states, res.Totals, true)
 	return res, err
 }
@@ -195,7 +202,7 @@ func (f *fileState) done() bool {
 	return f.finished && !f.cancelled && f.received == f.expected
 }
 
-func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBatch, done <-chan fileDone) (*sums, []*fileState) {
+func aggregate(sources []Source, maxErrors int, sum *sums, stop context.CancelCauseFunc, tr *tracker, results <-chan txBatch, done <-chan fileDone) []*fileState {
 	files := make(map[FileID]*fileState, len(sources))
 	states := make([]*fileState, 0, len(sources))
 	for _, src := range sources {
@@ -206,9 +213,8 @@ func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBa
 		files[src.ID] = f
 		states = append(states, f)
 	}
-	sum := newSums()
-	tick, stop := tr.ticks()
-	defer stop()
+	tick, stopTicks := tr.ticks()
+	defer stopTicks()
 	for results != nil || done != nil {
 		select {
 		case <-tick:
@@ -228,6 +234,9 @@ func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBa
 			}
 			for _, tx := range b.txs {
 				sum.add(tx)
+				if sum.overflowed {
+					stop(fmt.Errorf("%w: more than %d", ErrTooManyKeys, sum.maxKeys))
+				}
 			}
 		case d, ok := <-done:
 			if !ok {
@@ -246,7 +255,7 @@ func aggregate(sources []Source, maxErrors int, tr *tracker, results <-chan txBa
 			f.result.CloseErr = d.closeErr
 		}
 	}
-	return sum, states
+	return states
 }
 
 func finalize(sum *sums, states []*fileState, ctxErr error) (Result, error) {
@@ -261,6 +270,10 @@ func finalize(sum *sums, states []*fileState, ctxErr error) (Result, error) {
 		res.Files = append(res.Files, f.result)
 	}
 	slices.SortFunc(res.Files, func(a, b FileResult) int { return cmp.Compare(a.ID, b.ID) })
+	if sum.overflowed {
+		res.Totals = Totals{}
+		return res, fmt.Errorf("%w: more than %d", ErrTooManyKeys, sum.maxKeys)
+	}
 	if !cancelled {
 		res.Daily = sum.sortedDaily()
 		return res, nil
