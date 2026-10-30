@@ -1,4 +1,4 @@
-# csv-processor
+# file-processor
 
 Majoo take-home, Test Case 1: concurrent CSV processor in Go. Data: POS sales transactions from multiple outlets.
 
