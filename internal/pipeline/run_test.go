@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,7 @@ func generateSource(id FileID, rows int) (Source, Totals) {
 }
 
 func contentSource(id FileID, content string) Source {
-	return Source{ID: id, Open: func() (io.ReadCloser, error) {
+	return Source{ID: id, Open: func(ctx context.Context) (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader(content)), nil
 	}}
 }
@@ -113,8 +114,8 @@ type openTracker struct {
 }
 
 func (o *openTracker) wrap(s Source) Source {
-	return Source{ID: s.ID, Open: func() (io.ReadCloser, error) {
-		rc, err := s.Open()
+	return Source{ID: s.ID, Open: func(ctx context.Context) (io.ReadCloser, error) {
+		rc, err := s.Open(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -145,8 +146,8 @@ func (c *trackedCloser) Close() error {
 
 func midFileIOErrorSource(id FileID, rowsBefore int, cause error) Source {
 	good, _ := generateSource(id, rowsBefore)
-	return Source{ID: id, Open: func() (io.ReadCloser, error) {
-		rc, err := good.Open()
+	return Source{ID: id, Open: func(ctx context.Context) (io.ReadCloser, error) {
+		rc, err := good.Open(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -185,13 +186,13 @@ func TestRunGoroutineCountIndependentOfInputSize(t *testing.T) {
 	highest, samples := 0, 0
 	sampled := make([]Source, len(sources))
 	for i, s := range sources {
-		sampled[i] = Source{ID: s.ID, Open: func() (io.ReadCloser, error) {
+		sampled[i] = Source{ID: s.ID, Open: func(ctx context.Context) (io.ReadCloser, error) {
 			n := runtime.NumGoroutine()
 			mu.Lock()
 			highest = max(highest, n)
 			samples++
 			mu.Unlock()
-			return s.Open()
+			return s.Open(ctx)
 		}}
 	}
 	base := runtime.NumGoroutine()
@@ -243,7 +244,7 @@ func TestRunFileFailuresStayIsolated(t *testing.T) {
 	errDisk := errors.New("disk on fire")
 	good, want := generateSources(10, 300)
 	sources := append(good,
-		Source{ID: 100, Open: func() (io.ReadCloser, error) { return nil, errOpen }},
+		Source{ID: 100, Open: func(ctx context.Context) (io.ReadCloser, error) { return nil, errOpen }},
 		contentSource(101, "outlet_id,transaction_id\n"+row(1)),
 		midFileIOErrorSource(102, 40, errDisk),
 	)
@@ -319,7 +320,8 @@ func TestAggregateCountsBatchesPerFile(t *testing.T) {
 	close(results)
 	close(done)
 
-	res := aggregate(sources, results, done)
+	totals, states := aggregate(sources, results, done)
+	res, _ := finalize(totals, states, nil)
 	if f := fileResult(t, res, 1); !f.Done || f.Valid != 2 {
 		t.Fatalf("file 1 = %+v, want done with 2 valid rows after its done message arrived first", f)
 	}
@@ -336,7 +338,7 @@ func TestRunMemoryStaysBounded(t *testing.T) {
 	const limit = 64 << 20
 	var sources []Source
 	for i := range files {
-		sources = append(sources, Source{ID: FileID(i), Open: func() (io.ReadCloser, error) {
+		sources = append(sources, Source{ID: FileID(i), Open: func(ctx context.Context) (io.ReadCloser, error) {
 			return io.NopCloser(&rowGenerator{rows: rows}), nil
 		}})
 	}

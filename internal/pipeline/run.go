@@ -3,7 +3,6 @@ package pipeline
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -12,7 +11,7 @@ import (
 
 type Source struct {
 	ID   FileID
-	Open func() (io.ReadCloser, error)
+	Open func(ctx context.Context) (io.ReadCloser, error)
 }
 
 type Totals struct {
@@ -22,11 +21,12 @@ type Totals struct {
 }
 
 type FileResult struct {
-	ID      FileID
-	Valid   int64
-	Invalid int64
-	Done    bool
-	Err     error
+	ID        FileID
+	Valid     int64
+	Invalid   int64
+	Done      bool
+	Cancelled bool
+	Err       error
 }
 
 type Result struct {
@@ -41,9 +41,10 @@ type txBatch struct {
 }
 
 type fileDone struct {
-	file  FileID
-	stats ReadStats
-	err   error
+	file      FileID
+	stats     ReadStats
+	err       error
+	cancelled bool
 }
 
 func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
@@ -68,7 +69,7 @@ func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
 
 	var workers sync.WaitGroup
 	for range cfg.Workers {
-		workers.Go(func() { convert(ctx, batches, results) })
+		workers.Go(func() { convert(batches, results) })
 	}
 
 	go func() {
@@ -79,8 +80,8 @@ func Run(ctx context.Context, cfg Config, sources []Source) (Result, error) {
 		close(results)
 	}()
 
-	res := aggregate(sources, results, done)
-	return res, ctx.Err()
+	totals, states := aggregate(sources, results, done)
+	return finalize(totals, states, ctx.Err())
 }
 
 func validateSources(sources []Source) error {
@@ -110,29 +111,40 @@ func feed(ctx context.Context, sources []Source, jobs chan<- Source) {
 
 func readSources(ctx context.Context, cfg Config, jobs <-chan Source, batches chan<- Batch, done chan<- fileDone) {
 	for src := range jobs {
-		stats, err := readSource(ctx, cfg, src, batches)
-		select {
-		case done <- fileDone{file: src.ID, stats: stats, err: err}:
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
 		}
+		stats, interrupted, err := readSource(ctx, cfg, src, batches)
+		cancelled := interrupted || (err != nil && ctx.Err() != nil)
+		done <- fileDone{file: src.ID, stats: stats, err: err, cancelled: cancelled}
 	}
 }
 
-func readSource(ctx context.Context, cfg Config, src Source, batches chan<- Batch) (stats ReadStats, err error) {
-	rc, err := src.Open()
+func readSource(ctx context.Context, cfg Config, src Source, batches chan<- Batch) (stats ReadStats, interrupted bool, err error) {
+	rc, err := src.Open(ctx)
 	if err != nil {
-		return ReadStats{}, &FileError{File: src.ID, Err: fmt.Errorf("open: %w", err)}
+		return ReadStats{}, false, &FileError{File: src.ID, Err: fmt.Errorf("open: %w", err)}
 	}
+	closedOnCancel := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = rc.Close()
+		close(closedOnCancel)
+	})
 	defer func() {
+		if !stop() {
+			<-closedOnCancel
+			interrupted = true
+			return
+		}
 		if closeErr := rc.Close(); closeErr != nil && err == nil {
 			err = &FileError{File: src.ID, Err: fmt.Errorf("close: %w", closeErr)}
 		}
 	}()
-	return ReadCSV(ctx, src.ID, rc, cfg, batches)
+	stats, err = ReadCSV(ctx, src.ID, rc, cfg, batches)
+	return stats, false, err
 }
 
-func convert(ctx context.Context, batches <-chan Batch, results chan<- txBatch) {
+func convert(batches <-chan Batch, results chan<- txBatch) {
 	for b := range batches {
 		out := txBatch{file: b.File, txs: make([]Transaction, 0, len(b.Rows)), errors: b.Errors}
 		for _, row := range b.Rows {
@@ -143,25 +155,29 @@ func convert(ctx context.Context, batches <-chan Batch, results chan<- txBatch) 
 			}
 			out.txs = append(out.txs, tx)
 		}
-		select {
-		case results <- out:
-		case <-ctx.Done():
-			return
-		}
+		results <- out
 	}
 }
 
 type fileState struct {
-	result   FileResult
-	received int
-	expected int
-	finished bool
+	result    FileResult
+	received  int
+	expected  int
+	finished  bool
+	cancelled bool
 }
 
-func aggregate(sources []Source, results <-chan txBatch, done <-chan fileDone) Result {
+func (f *fileState) done() bool {
+	return f.finished && !f.cancelled && f.received == f.expected
+}
+
+func aggregate(sources []Source, results <-chan txBatch, done <-chan fileDone) (Totals, []*fileState) {
 	files := make(map[FileID]*fileState, len(sources))
+	states := make([]*fileState, 0, len(sources))
 	for _, src := range sources {
-		files[src.ID] = &fileState{result: FileResult{ID: src.ID}}
+		f := &fileState{result: FileResult{ID: src.ID}}
+		files[src.ID] = f
+		states = append(states, f)
 	}
 	var totals Totals
 	for results != nil || done != nil {
@@ -186,19 +202,34 @@ func aggregate(sources []Source, results <-chan txBatch, done <-chan fileDone) R
 				continue
 			}
 			f := files[d.file]
-			f.finished = true
 			f.expected = d.stats.Batches
-			if d.err != nil && !errors.Is(d.err, context.Canceled) {
-				f.result.Err = d.err
+			if d.cancelled {
+				f.cancelled = true
+				continue
 			}
+			f.finished = true
+			f.result.Err = d.err
 		}
 	}
+	return totals, states
+}
 
-	res := Result{Totals: totals, Files: make([]FileResult, 0, len(files))}
-	for _, f := range files {
-		f.result.Done = f.finished && f.received == f.expected
+func finalize(totals Totals, states []*fileState, ctxErr error) (Result, error) {
+	res := Result{Totals: totals, Files: make([]FileResult, 0, len(states))}
+	cancelled := false
+	for _, f := range states {
+		f.result.Done = f.done()
+		f.result.Cancelled = !f.result.Done
+		cancelled = cancelled || f.result.Cancelled
 		res.Files = append(res.Files, f.result)
 	}
 	slices.SortFunc(res.Files, func(a, b FileResult) int { return cmp.Compare(a.ID, b.ID) })
-	return res
+	if !cancelled {
+		return res, nil
+	}
+	res.Totals = Totals{}
+	if ctxErr == nil {
+		ctxErr = context.Canceled
+	}
+	return res, ctxErr
 }
