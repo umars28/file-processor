@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 
 	"github.com/umars28/file-processor/internal/config"
 	"github.com/umars28/file-processor/internal/httpapi"
@@ -15,9 +17,10 @@ import (
 )
 
 const (
-	exitOK    = 0
-	exitError = 1
-	exitUsage = 2
+	exitOK        = 0
+	exitError     = 1
+	exitUsage     = 2
+	exitCancelled = 130
 )
 
 const usage = `usage: fileproc <subcommand> [flags]
@@ -38,7 +41,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	}
 	switch args[0] {
 	case "run":
-		return runCmd(args[1:], stderr)
+		return runCmd(ctx, args[1:], stderr)
 	case "serve":
 		return serveCmd(ctx, args[1:], stderr, getenv)
 	case "migrate":
@@ -74,9 +77,21 @@ func parseFlags(fs *flag.FlagSet, args []string) (code int, ok bool) {
 	}
 }
 
-func runCmd(args []string, stderr io.Writer) int {
+const runExitCodes = `
+exit codes:
+  0    every file is ok or ok_with_errors
+  1    at least one file is partial or failed
+  2    invalid usage or flags
+  130  the run was cancelled`
+
+func runCmd(ctx context.Context, args []string, stderr io.Writer) int {
 	cfg := pipeline.DefaultConfig()
 	fs := newFlagSet("run", "[flags] <file.csv>...", stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: fileproc run [flags] <file.csv>...")
+		fs.PrintDefaults()
+		fmt.Fprintln(stderr, runExitCodes)
+	}
 	fs.IntVar(&cfg.Readers, "readers", cfg.Readers, "maximum number of files read at the same time")
 	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "number of workers converting and validating rows")
 	fs.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "rows per batch sent between pipeline stages")
@@ -85,7 +100,8 @@ func runCmd(args []string, stderr io.Writer) int {
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
-	if fs.NArg() == 0 {
+	paths := fs.Args()
+	if len(paths) == 0 {
 		fmt.Fprintln(stderr, "run: at least one CSV file is required")
 		fs.Usage()
 		return exitUsage
@@ -94,8 +110,68 @@ func runCmd(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "run: %v\n", err)
 		return exitUsage
 	}
-	fmt.Fprintf(stderr, "run: %v\n", errNotImplemented)
-	return exitError
+
+	res, err := pipeline.Run(ctx, cfg, fileSources(paths))
+	for _, f := range res.Files {
+		printFileSummary(stderr, paths[f.ID], f)
+	}
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		fmt.Fprintln(stderr, "run: cancelled")
+		return exitCancelled
+	case err != nil:
+		fmt.Fprintf(stderr, "run: %v\n", err)
+		return exitError
+	}
+	for _, f := range res.Files {
+		if f.Status == pipeline.StatusPartial || f.Status == pipeline.StatusFailed {
+			return exitError
+		}
+	}
+	return exitOK
+}
+
+func fileSources(paths []string) []pipeline.Source {
+	sources := make([]pipeline.Source, len(paths))
+	for i, p := range paths {
+		path := filepath.Clean(p)
+		sources[i] = pipeline.Source{
+			ID:   pipeline.FileID(i),
+			Open: func(context.Context) (io.ReadCloser, error) { return os.Open(path) },
+		}
+	}
+	return sources
+}
+
+func printFileSummary(w io.Writer, path string, f pipeline.FileResult) {
+	fmt.Fprintf(w, "%s: %s valid=%d invalid=%d", path, f.Status, f.Valid, f.Invalid)
+	if f.Err != nil {
+		fmt.Fprintf(w, " last_line=%d error=%q", f.LastLine, describe(f.Err))
+	}
+	if f.CloseErr != nil {
+		fmt.Fprintf(w, " close_error=%q", describe(f.CloseErr))
+	}
+	if len(f.Errors) > 0 {
+		e := f.Errors[0]
+		where := fmt.Sprintf("line %d", e.Line)
+		if e.Column != "" {
+			where += " column " + e.Column
+		}
+		fmt.Fprintf(w, " first_error=%q", where+": "+describe(e.Err))
+	}
+	fmt.Fprintln(w)
+}
+
+func describe(err error) string {
+	var fileErr *pipeline.FileError
+	if errors.As(err, &fileErr) {
+		err = fileErr.Err
+	}
+	var fieldErr *pipeline.FieldError
+	if errors.As(err, &fieldErr) {
+		return fmt.Sprintf("%v (value %q)", fieldErr.Err, fieldErr.Value)
+	}
+	return err.Error()
 }
 
 func serveCmd(ctx context.Context, args []string, stderr io.Writer, getenv func(string) string) int {

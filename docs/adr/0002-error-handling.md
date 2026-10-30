@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-30
+- Amended: 2026-10-30 (T5: partial versus failed, close errors)
 
 ## Context
 
@@ -95,6 +96,8 @@ How it works:
 - The reader strips a UTF-8 byte order mark and checks the header before sending anything. If the header doesn't match, the file fails with nothing aggregated.
 - If a file breaks halfway through (an I/O error), I keep what was already counted and mark the file as `partial`, with the error and the last line read. Throwing those rows away would need per-file staging in the aggregator, and I think a clearly marked partial file is the more honest result anyway.
 - The same goes for a record that is too large. Without a cap, one unclosed quote early in an export makes `csv.Reader` hold the rest of the file in memory, which breaks the memory bound from ADR 0001. So a record past `--max-record-bytes` (64 KiB by default, enforced to within a few KiB) stops the file with `ErrRecordTooLarge`. I can't resync after that, because I no longer know where the next record starts, so the file ends as `partial` just like an I/O error.
+- Whether a broken file is `partial` or `failed` depends on one thing: did at least one data row get read before it broke? If yes, some of it may already be in the totals, so it's `partial`. If no (it couldn't be opened, the header was wrong, or the very first data row was already too large or unreadable), nothing from it was counted and it's `failed`. I'd rather have one rule for every file error than special-case the too-large record.
+- An error from closing a file after it was read cleanly doesn't change its status. Every row was already counted, so failing the file would be wrong. The close error is still reported next to the file.
 - To know a file is finished, its reader sends a final status with the number of batches it produced. The aggregator closes the file once that status and all of its batches have arrived.
 - Errors are typed: `RowError` and `FileError` wrap sentinel kinds such as `ErrCSVSyntax`, `ErrFieldCount`, `ErrMissingField`, `ErrInvalidNumber`, `ErrInvalidDate`, and `ErrHeaderMismatch`, so tests use `errors.Is` and `errors.As` instead of comparing strings.
 - Each file ends as `ok`, `ok_with_errors`, `partial`, `failed`, or `cancelled`.
@@ -107,7 +110,7 @@ How it's reported depends on the entry point (ADR 0003):
 ## Consequences
 
 - T2 strips the byte order mark, validates the header, and records physical line numbers.
-- T5 implements the report types, error kinds, statuses, and CLI exit codes; its AC can assert on `errors.Is` and on exact counts. `ErrRecordTooLarge` maps to `partial`.
+- T5 implements the report types, error kinds, statuses, and CLI exit codes; its AC can assert on `errors.Is` and on exact counts. A file error is `partial` once a data row has been read and `failed` before that, `ErrRecordTooLarge` included; a close error after a clean read is reported without changing the status.
 - T7 aggregates may include rows from a `partial` file, so the README and the report have to make that visible.
 - Invalid rows beyond the first 100 are counted but not listed. If someone needs every rejected row, B can be added later without changing who owns the report.
 - T4 doesn't have an extra writer goroutine to shut down.
