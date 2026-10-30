@@ -219,15 +219,15 @@ make bench
 make latency
 ```
 
-`make check` needs the Compose database, because store, API, and end-to-end tests run against real PostgreSQL. Each DB-backed test package uses its own schema, so packages run in parallel. Plain `go test ./...` without `TEST_DATABASE_URL` skips the database tests.
+`make latency` is a timing measurement, so it is not part of `make check`, which runs every package in parallel under `-race`; the 200 ms cancel bound is still checked there by the smaller T4 tests. `make check` needs the Compose database, because store, API, and end-to-end tests run against real PostgreSQL. Each DB-backed test package uses its own schema, so packages run in parallel. Plain `go test ./...` without `TEST_DATABASE_URL` skips the database tests.
 
 What the tests cover beyond the happy path: 200 random-point cancellations per run with leak and race checks, determinism across repeated runs, memory bounds over millions of rows, a 300 MB single line and an unclosed quote, symlink and FIFO tricks against the data directory, slow clients, transactions that fail halfway, and an end-to-end check that HTTP results equal CLI output for the same files.
 
-Coverage from the latest `make cover` (total 90.2%, minimum 80% enforced):
+Coverage from the latest `make cover` (total 90.1%, minimum 80% enforced):
 
 | Package | Coverage |
 |---|---|
-| `internal/pipeline` | 97.4% |
+| `internal/pipeline` | 97.2% |
 | `internal/jobs` | 94.7% |
 | `internal/gendata` | 94.7% |
 | `cmd/gendata` | 89.5% |
@@ -236,6 +236,7 @@ Coverage from the latest `make cover` (total 90.2%, minimum 80% enforced):
 | `internal/cli` | 89.5% |
 | `internal/store` | 81.2% |
 | `internal/config` | 100.0% |
+| `internal/testdb` | 0.0%: a helper that sets up a schema for other packages' tests; it has no tests of its own |
 | `cmd/fileproc` | 0.0%: a four-line `main`. A test builds and signals the real binary, but a subprocess is not instrumented, so it is exercised without being counted |
 
 ## Performance
@@ -252,7 +253,7 @@ Measured on an Apple M5 (10 cores, 24 GB) with Go 1.27.3, without `-race`. Bench
 
 | Measurement | Result |
 |---|---|
-| Cancel to return with at least 100,000 distinct keys (`make latency`, 50 runs) | median 14 ms, worst 48 ms (target 200 ms) |
+| Cancel to return with at least 100,000 distinct keys (`make latency`, 50 runs) | median 14 ms, worst 18–48 ms across runs (target 200 ms) |
 | Reader, 1 million rows (`TestReadCSVMemoryStaysBounded`, 3 runs) | peak heap 3.8 MB |
 | Pipeline, 2 million rows over 500 keys (`TestRunMemoryStaysBounded`, 3 runs) | peak heap 3.8–6.4 MB |
 | Pipeline, 2 million rows over 25,000 keys (3 runs) | peak heap 19–22 MB |

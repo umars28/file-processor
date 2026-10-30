@@ -31,7 +31,7 @@ bench:
 	go test -run '^$$' -bench . -benchmem -count=5 ./internal/pipeline/
 
 latency:
-	go test -run TestCancelLatencyWithManyKeys -count=1 -v ./internal/pipeline/
+	FILEPROC_LATENCY=1 go test -run TestCancelLatencyWithManyKeys -count=1 -v ./internal/pipeline/
 
 hooks:
 	git config core.hooksPath .githooks

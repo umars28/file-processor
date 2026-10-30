@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"io"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,8 +170,8 @@ func (u *uniqueKeyReader) Read(p []byte) (int, error) {
 }
 
 func TestCancelLatencyWithManyKeys(t *testing.T) {
-	if testing.Short() {
-		t.Skip("measures 50 cancellations")
+	if os.Getenv("FILEPROC_LATENCY") == "" {
+		t.Skip("timing measurement; run it alone with make latency")
 	}
 	const runs, minKeys = 50, 100_000
 	latencies := make([]time.Duration, 0, runs)
