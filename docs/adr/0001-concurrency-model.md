@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-30
+- Amended: 2026-10-30 (T4: cancellation)
 
 ## Context
 
@@ -84,7 +85,10 @@ How I want it built:
 - A fixed pool of N workers (`--workers`, defaults to the number of CPUs) converts and validates rows.
 - One aggregator goroutine owns all the maps. Amounts are `int64` in the smallest currency unit, so the totals don't depend on the order batches arrive in.
 - Only the side that sends on a channel closes it, and only after every sender is done: readers finish, then the rows channel closes; workers finish, then the transactions channel closes.
-- Every send and receive also listens on `ctx.Done()`, so nothing can block forever after a cancel.
+- On cancel, the stages that produce work stop right away: the feeder stops handing out files, readers stop at their next batch and never open another file, and an open file is closed so even a blocked read returns. Their batch sends listen on `ctx.Done()`. Each reader still always reports the file it took, which is safe because that channel is buffered per reader and the aggregator never stops reading it.
+- Closing the file on cancel happens on a different goroutine than the one reading it, so a source's `Close` must be safe to call while a `Read` is in progress. Files, network connections, and HTTP bodies already behave that way; a custom source has to as well. If the close interrupts a file, that file counts as cancelled even if the read ends in a clean EOF.
+- The stages after the readers don't stop early. Workers finish the batches already in their channel and the aggregator keeps reading until every channel is closed. I changed this during T4: if workers also bailed out on cancel, whether a file that had been fully read still counted would depend on scheduling. Now the rule is simple, every batch that left a reader is aggregated, and the extra work is bounded by the channel buffers (a few times `--workers` batches).
+- A file counts as cancelled only when the run was cancelled while it was still being read. A source's own error, even one that wraps a context deadline from its storage client, stays a file error.
 
 When a run is cancelled I keep the per-file reports but I don't save any aggregates. A half-processed total is more misleading than no total.
 
@@ -93,5 +97,6 @@ When a run is cancelled I keep the per-file reports but I don't save any aggrega
 - A single very large file is bounded by its reader's tokenization speed; T8 measures reader throughput separately to show where that ceiling is.
 - The aggregator is a possible bottleneck; T8 measures it, and sharding by key is the fallback if it turns out to be one.
 - T4 owns the shutdown order and has to prove with `goleak` that no goroutine survives either a normal finish or a cancel.
+- The time between cancel and `Run` returning grows with the aggregator's cost per batch times the channel buffers; T8 measures it against the 200 ms target from T4.
 - T5 and T6 depend on the file ID and line number carried with each row.
 - A cancelled job ends with file reports and no aggregates (see ADR 0003 for how results are saved).

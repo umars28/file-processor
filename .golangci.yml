@@ -18,6 +18,10 @@ linters:
         linters:
           - errcheck
         text: "Error return value of `fmt\\.Fprint(f|ln)?` is not checked"
+      - path: _test\.go$
+        linters:
+          - gosec
+        text: "^G(204|404):"
 
 formatters:
   enable:

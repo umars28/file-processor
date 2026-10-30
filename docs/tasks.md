@@ -60,11 +60,18 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T4 — Cancellation and graceful shutdown
 
 - Owner: human
-- Status: draft
+- Status: done
 - ADR: 0001
 - Scope: `context` driven by OS signals, channels closed only by their senders, all goroutines stop on both normal finish and cancel, no goroutine leaks. A cancelled run keeps file reports and drops aggregates. Carried over from the T3 review: cancelled files must be distinguishable from completed ones (currently `Err == nil` and `Done == false`), `context.DeadlineExceeded` must be treated like `context.Canceled` instead of surfacing as a raw file error, `Run` must not return partial `Totals` on cancel, and a blocking `Source.Open` must either take a `context` or be documented as a limit on how fast cancel takes effect.
 
 ### AC
+
+- [ ] Cancelling at a random point (0–5 ms after start) in each of 200 runs over 100 sources: every `Run` returns within 200 ms of cancellation with an error matching `context.Canceled`, every opened source is closed, no `send on closed channel` panic occurs, and `goleak` passes with `-race`.
+- [ ] A run that hits a `context.WithTimeout` deadline behaves exactly like a cancelled run: the error matches `context.DeadlineExceeded`, and no file result carries a raw context error.
+- [ ] A cancelled run returns zero `Totals`. Files that finished before the cancel keep their counts and errors with `Done == true`; every other file, including ones never opened, has `Cancelled == true`.
+- [ ] Edge case: when the context is cancelled only after every file has finished, `Run` returns the full totals and a nil error, and no file is marked cancelled.
+- [ ] `Source.Open` receives the run's context. Failure case: an `Open` that blocks until its context is done does not hold up cancellation; `Run` still returns within 200 ms.
+- [ ] `fileproc serve` started as a real process stops on `SIGINT` and on `SIGTERM`, logs `stopped`, and exits 0 within 2 seconds.
 
 ## T5 — Per-row and per-file error handling
 
@@ -98,7 +105,7 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 - Owner: AI
 - Status: draft
 - ADR: -
-- Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
+- Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), time from cancel to return under a realistic aggregator cost (ADR 0001, 200 ms target from T4), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
 
 ### AC
 
