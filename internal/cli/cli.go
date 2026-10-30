@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/umars28/file-processor/internal/config"
 	"github.com/umars28/file-processor/internal/httpapi"
 	"github.com/umars28/file-processor/internal/pipeline"
+	"github.com/umars28/file-processor/internal/report"
 )
 
 const (
@@ -43,7 +45,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	}
 	switch args[0] {
 	case "run":
-		return runCmd(ctx, args[1:], stderr)
+		return runCmd(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return serveCmd(ctx, args[1:], stderr, getenv)
 	case "migrate":
@@ -86,7 +88,7 @@ exit codes:
   2    invalid usage or flags
   130  the run was cancelled`
 
-func runCmd(ctx context.Context, args []string, stderr io.Writer) int {
+func runCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	cfg := pipeline.DefaultConfig()
 	fs := newFlagSet("run", "[flags] <file.csv>...", stderr)
 	fs.Usage = func() {
@@ -122,8 +124,21 @@ func runCmd(ctx context.Context, args []string, stderr io.Writer) int {
 	for _, f := range res.Files {
 		printFileSummary(stderr, paths[f.ID], f)
 	}
+	cancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	if err == nil || cancelled {
+		doc := report.Build(res, cancelled, func(id pipeline.FileID) string { return paths[id] })
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if encErr := enc.Encode(doc); encErr != nil {
+			fmt.Fprintf(stderr, "run: write results: %v\n", encErr)
+			if cancelled {
+				return exitCancelled
+			}
+			return exitError
+		}
+	}
 	switch {
-	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+	case cancelled:
 		fmt.Fprintln(stderr, "run: cancelled")
 		return exitCancelled
 	case err != nil:
@@ -203,10 +218,10 @@ func fileSources(paths []string) []pipeline.Source {
 func printFileSummary(w io.Writer, path string, f pipeline.FileResult) {
 	fmt.Fprintf(w, "%s: %s valid=%d invalid=%d", path, f.Status, f.Valid, f.Invalid)
 	if f.Err != nil {
-		fmt.Fprintf(w, " last_line=%d error=%q", f.LastLine, describe(f.Err))
+		fmt.Fprintf(w, " last_line=%d error=%q", f.LastLine, report.Describe(f.Err))
 	}
 	if f.CloseErr != nil {
-		fmt.Fprintf(w, " close_error=%q", describe(f.CloseErr))
+		fmt.Fprintf(w, " close_error=%q", report.Describe(f.CloseErr))
 	}
 	if len(f.Errors) > 0 {
 		e := f.Errors[0]
@@ -214,21 +229,9 @@ func printFileSummary(w io.Writer, path string, f pipeline.FileResult) {
 		if e.Column != "" {
 			where += " column " + e.Column
 		}
-		fmt.Fprintf(w, " first_error=%q", where+": "+describe(e.Err))
+		fmt.Fprintf(w, " first_error=%q", where+": "+report.Describe(e.Err))
 	}
 	fmt.Fprintln(w)
-}
-
-func describe(err error) string {
-	var fileErr *pipeline.FileError
-	if errors.As(err, &fileErr) {
-		err = fileErr.Err
-	}
-	var fieldErr *pipeline.FieldError
-	if errors.As(err, &fieldErr) {
-		return fmt.Sprintf("%v (value %q)", fieldErr.Err, fieldErr.Value)
-	}
-	return err.Error()
 }
 
 func serveCmd(ctx context.Context, args []string, stderr io.Writer, getenv func(string) string) int {

@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-30
+- Amended: 2026-10-30 (T7: which task writes to PostgreSQL)
 
 ## Context
 
@@ -92,7 +93,7 @@ The CLI stays as well, mainly for local runs and benchmarks. It prints JSON and 
 ## Consequences
 
 - Two new tasks: database schema and migrations, and the HTTP API with its OpenAPI spec.
-- T7 writes aggregates and reports to PostgreSQL in one transaction at the end of a job instead of printing them.
+- T7 aggregates and prints results as JSON from the CLI; T9 and T10 write the same aggregates and reports to PostgreSQL in one transaction at the end of a job.
 - T6 progress has to be readable from another goroutine (the HTTP handler) while the job is running.
 - Integration tests run against a real PostgreSQL. Unit tests for the pipeline must not need it.
 - The exit codes in ADR 0002 apply to the CLI only; over HTTP the same information shows up as the job status.

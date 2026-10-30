@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -273,6 +274,116 @@ func TestRunProgressOnCancelledRun(t *testing.T) {
 	lines := progressLines(stderr)
 	if len(lines) == 0 || !strings.HasPrefix(lines[len(lines)-1], "progress (final): files 1/1") {
 		t.Fatalf("progress lines = %q, want a final line counting the cancelled file", lines)
+	}
+}
+
+type runJSON struct {
+	Status string `json:"status"`
+	Totals struct {
+		Transactions int64 `json:"transactions"`
+		Quantity     int64 `json:"quantity"`
+		Amount       int64 `json:"amount"`
+	} `json:"totals"`
+	Daily []struct {
+		Date         string `json:"date"`
+		OutletID     string `json:"outlet_id"`
+		ProductID    string `json:"product_id"`
+		Transactions int64  `json:"transactions"`
+		Quantity     int64  `json:"quantity"`
+		Amount       int64  `json:"amount"`
+	} `json:"daily"`
+	Files []struct {
+		Path        string           `json:"path"`
+		Status      string           `json:"status"`
+		Valid       int64            `json:"valid"`
+		Invalid     int64            `json:"invalid"`
+		ErrorCounts map[string]int64 `json:"error_counts"`
+		Errors      []struct {
+			Line    int    `json:"line"`
+			Column  string `json:"column"`
+			Kind    string `json:"kind"`
+			Message string `json:"message"`
+		} `json:"errors"`
+		Error    string `json:"error"`
+		LastLine int    `json:"last_line"`
+	} `json:"files"`
+}
+
+func decodeRunJSON(t *testing.T, stdout string) runJSON {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	dec.DisallowUnknownFields()
+	var doc runJSON
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("stdout is not the expected JSON: %v\n%s", err, stdout)
+	}
+	if dec.More() {
+		t.Fatalf("stdout holds more than one JSON document:\n%s", stdout)
+	}
+	return doc
+}
+
+func TestRunWritesJSONResults(t *testing.T) {
+	dir := t.TempDir()
+	a := writeCSV(t, dir, "a.csv", csvHeader+
+		"t1,o1,p1,2,5000,2026-10-30T09:00:00+07:00\n"+
+		"t2,o1,p1,1,2500,2026-10-30T20:00:00+07:00\n"+
+		"t3,o1,p1,x,1,2026-10-30T09:00:00+07:00\n")
+	b := writeCSV(t, dir, "b.csv", csvHeader+"t4,o2,p9,3,9000,2026-10-31T01:00:00+07:00\n")
+
+	code, stdout, stderr := run(t, t.Context(), env(nil), "run", a, b)
+	if code != exitOK {
+		t.Fatalf("exit = %d; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, a+": ok_with_errors") {
+		t.Fatalf("stderr summary changed: %s", stderr)
+	}
+	doc := decodeRunJSON(t, stdout)
+	if doc.Status != "completed" || doc.Totals.Transactions != 3 || doc.Totals.Quantity != 6 || doc.Totals.Amount != 16500 {
+		t.Fatalf("status/totals = %q %+v", doc.Status, doc.Totals)
+	}
+	if len(doc.Daily) != 2 || doc.Daily[0].OutletID != "o1" || doc.Daily[0].Transactions != 2 || doc.Daily[0].Amount != 7500 ||
+		doc.Daily[1].Date != "2026-10-31" || doc.Daily[1].ProductID != "p9" {
+		t.Fatalf("daily = %+v", doc.Daily)
+	}
+	if len(doc.Files) != 2 || doc.Files[0].Path != a || doc.Files[0].Status != "ok_with_errors" || doc.Files[0].ErrorCounts["invalid_number"] != 1 {
+		t.Fatalf("files = %+v", doc.Files)
+	}
+	e := doc.Files[0].Errors
+	if len(e) != 1 || e[0].Line != 4 || e[0].Column != "quantity" || e[0].Kind != "invalid_number" || !strings.Contains(e[0].Message, `"x"`) {
+		t.Fatalf("errors = %+v", e)
+	}
+	if !strings.Contains(stdout, `"amount": 16500`) {
+		t.Fatalf("amounts are not JSON integers:\n%s", stdout)
+	}
+}
+
+func TestRunJSONOnFailureAndCancel(t *testing.T) {
+	dir := t.TempDir()
+	good := writeCSV(t, dir, "good.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n")
+	missing := filepath.Join(dir, "missing.csv")
+
+	code, stdout, _ := run(t, t.Context(), env(nil), "run", good, missing)
+	if code != exitError {
+		t.Fatalf("exit = %d, want %d", code, exitError)
+	}
+	doc := decodeRunJSON(t, stdout)
+	if doc.Status != "completed" || doc.Files[1].Status != "failed" || doc.Files[1].Error == "" || len(doc.Daily) != 1 {
+		t.Fatalf("failure document = %+v", doc)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	code, stdout, _ = run(t, ctx, env(nil), "run", good)
+	if code != exitCancelled {
+		t.Fatalf("exit = %d, want %d", code, exitCancelled)
+	}
+	doc = decodeRunJSON(t, stdout)
+	if doc.Status != "cancelled" || doc.Daily == nil || len(doc.Daily) != 0 || doc.Files[0].Status != "cancelled" {
+		t.Fatalf("cancelled document = %+v", doc)
+	}
+	if !strings.Contains(stdout, `"daily": []`) {
+		t.Fatalf("cancelled daily is not an empty array:\n%s", stdout)
 	}
 }
 
