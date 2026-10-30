@@ -9,6 +9,14 @@ It runs two ways:
 
 Built for the Majoo Software Architect Engineer take-home, Test Case 1 (Concurrent Data Processing).
 
+## Take-home sections
+
+| Section | Repository |
+|---|---|
+| 1. Go programming test: concurrent file processing | [file-processor](https://github.com/umars28/file-processor) (this repo) |
+| 2. System architecture: e-commerce platform | [ecommerce-system-design](https://github.com/umars28/ecommerce-system-design) |
+| 3. Database design: social media platform | [social-media-db-design](https://github.com/umars28/social-media-db-design) |
+
 ## Contents
 
 - [Quick start](#quick-start)
