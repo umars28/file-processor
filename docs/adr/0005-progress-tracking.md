@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-30
+- Amended: 2026-10-30 (T6: snapshot totals and byte accounting)
 
 ## Context
 
@@ -69,4 +70,6 @@ A snapshot contains, per file: status, bytes read, size, rows processed, rows in
 - T6 implements the counting reader, the snapshot type, and the publishing loop inside the aggregator; its AC can check that snapshots are consistent under `-race`.
 - The CLI renders the latest snapshot on stderr; the HTTP API returns it from `GET /jobs/{id}`.
 - When a job ends, the final snapshot is what gets saved with the job (ADR 0004), so the last progress seen and the stored result agree.
+- In a snapshot, `Valid` and `Invalid` are the rows aggregated so far, while `Totals` (transactions, quantity, amount) follow the result: running totals while the job runs, and zero in the final snapshot of a cancelled job, because ADR 0001 drops the aggregates of a cancelled run. A cancelled final snapshot therefore shows rows counted but no totals; that is intended.
+- In the final snapshot every file that finished, including one that failed early, counts its whole size as read, so a finished job reads 100%. Per-file bytes are capped at the declared size, because a wrong `Size` must not push a file past 100%.
 - The interval is a constant for now; it can become a flag if it ever matters.

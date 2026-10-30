@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/umars28/file-processor/internal/config"
 	"github.com/umars28/file-processor/internal/httpapi"
@@ -97,6 +99,7 @@ func runCmd(ctx context.Context, args []string, stderr io.Writer) int {
 	fs.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "rows per batch sent between pipeline stages")
 	fs.IntVar(&cfg.MaxErrorsPerFile, "max-errors-per-file", cfg.MaxErrorsPerFile, "row errors kept per file in the report")
 	fs.IntVar(&cfg.MaxRecordBytes, "max-record-bytes", cfg.MaxRecordBytes, "approximate largest CSV record, in bytes, before the file fails")
+	showProgress := fs.Bool("progress", false, "print progress lines to stderr while files are processed")
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
@@ -111,7 +114,11 @@ func runCmd(ctx context.Context, args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	res, err := pipeline.Run(ctx, cfg, fileSources(paths))
+	var interval time.Duration
+	if *showProgress {
+		interval = pipeline.DefaultProgressInterval
+	}
+	res, err := runPipeline(ctx, cfg, fileSources(paths), interval, stderr)
 	for _, f := range res.Files {
 		printFileSummary(stderr, paths[f.ID], f)
 	}
@@ -131,12 +138,62 @@ func runCmd(ctx context.Context, args []string, stderr io.Writer) int {
 	return exitOK
 }
 
+func runPipeline(ctx context.Context, cfg pipeline.Config, sources []pipeline.Source, interval time.Duration, stderr io.Writer) (pipeline.Result, error) {
+	if interval <= 0 {
+		return pipeline.Run(ctx, cfg, sources)
+	}
+	p := pipeline.NewProgress(interval)
+	stop := make(chan struct{})
+	var printer sync.WaitGroup
+	printer.Go(func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var last *pipeline.Snapshot
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if s := p.Snapshot(); s != nil && s != last && !s.Final {
+					printProgress(stderr, s)
+					last = s
+				}
+			}
+		}
+	})
+	res, err := pipeline.RunWithProgress(ctx, cfg, sources, p)
+	close(stop)
+	printer.Wait()
+	if s := p.Snapshot(); s != nil {
+		printProgress(stderr, s)
+	}
+	return res, err
+}
+
+func printProgress(w io.Writer, s *pipeline.Snapshot) {
+	label := "progress:"
+	if s.Final {
+		label = "progress (final):"
+	}
+	pct := "?"
+	if v, ok := s.Percent(); ok {
+		pct = fmt.Sprintf("%.1f%%", v)
+	}
+	fmt.Fprintf(w, "%s files %d/%d, %s, valid %d, invalid %d, elapsed %s\n",
+		label, s.FilesDone, s.FilesTotal, pct, s.Valid, s.Invalid, s.Elapsed.Round(time.Millisecond))
+}
+
 func fileSources(paths []string) []pipeline.Source {
 	sources := make([]pipeline.Source, len(paths))
 	for i, p := range paths {
 		path := filepath.Clean(p)
+		var size int64
+		if info, err := os.Stat(path); err == nil {
+			size = info.Size()
+		}
 		sources[i] = pipeline.Source{
 			ID:   pipeline.FileID(i),
+			Size: size,
 			Open: func(context.Context) (io.ReadCloser, error) { return os.Open(path) },
 		}
 	}

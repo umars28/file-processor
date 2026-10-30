@@ -320,7 +320,7 @@ func TestAggregateCountsBatchesPerFile(t *testing.T) {
 	close(results)
 	close(done)
 
-	totals, states := aggregate(sources, 100, results, done)
+	totals, states := aggregate(sources, 100, newTracker(nil, sources), results, done)
 	res, _ := finalize(totals, states, nil)
 	if f := fileResult(t, res, 1); !f.Done || f.Valid != 2 {
 		t.Fatalf("file 1 = %+v, want done with 2 valid rows after its done message arrived first", f)

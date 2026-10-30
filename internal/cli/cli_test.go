@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/umars28/file-processor/internal/pipeline"
 	"go.uber.org/goleak"
 )
 
@@ -66,7 +68,7 @@ func TestTopLevelHelp(t *testing.T) {
 
 func TestSubcommandHelpListsFlags(t *testing.T) {
 	tests := map[string][]string{
-		"run":     {"-readers", "-workers", "-batch-size", "-max-errors-per-file", "-max-record-bytes"},
+		"run":     {"-readers", "-workers", "-batch-size", "-max-errors-per-file", "-max-record-bytes", "-progress"},
 		"serve":   {"-addr"},
 		"migrate": {"usage: fileproc migrate"},
 	}
@@ -188,6 +190,89 @@ func TestRunExitsOneThirtyWhenCancelled(t *testing.T) {
 	}
 	if !strings.Contains(stderr, ": cancelled ") {
 		t.Fatalf("stderr = %s, want the file reported as cancelled", stderr)
+	}
+}
+
+func TestRunProgressFlag(t *testing.T) {
+	dir := t.TempDir()
+	good := writeCSV(t, dir, "good.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n")
+	other := writeCSV(t, dir, "other.csv", csvHeader+"t2,o1,p1,1,1000,2026-10-30T09:00:00Z\nt3,o1,p1,x,1,2026-10-30T09:00:00Z\n")
+
+	code, _, stderr := run(t, t.Context(), env(nil), "run", "-progress", good, other)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, exitOK, stderr)
+	}
+	var final []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "progress (final):") {
+			final = append(final, line)
+		}
+	}
+	if len(final) != 1 {
+		t.Fatalf("got %d final progress lines, want 1:\n%s", len(final), stderr)
+	}
+	for _, want := range []string{"files 2/2", "100.0%", "valid 2", "invalid 1", "elapsed "} {
+		if !strings.Contains(final[0], want) {
+			t.Errorf("final progress line %q missing %q", final[0], want)
+		}
+	}
+
+	_, _, quiet := run(t, t.Context(), env(nil), "run", good)
+	if strings.Contains(quiet, "progress") {
+		t.Fatalf("stderr without -progress = %q, want no progress lines", quiet)
+	}
+}
+
+func progressLines(stderr string) []string {
+	var lines []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "progress") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func TestRunPipelinePrintsFinalLineOnceAndLast(t *testing.T) {
+	dir := t.TempDir()
+	var buf []byte
+	buf = append(buf, csvHeader...)
+	for i := range 2000 {
+		buf = fmt.Appendf(buf, "t%d,o1,p1,1,100,2026-10-30T09:00:00Z\n", i)
+	}
+	path := writeCSV(t, dir, "many.csv", string(buf))
+	cfg := pipeline.DefaultConfig()
+	cfg.BatchSize = 8
+	for i := range 200 {
+		var stderr bytes.Buffer
+		if _, err := runPipeline(t.Context(), cfg, fileSources([]string{path}), 50*time.Microsecond, &stderr); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		lines := progressLines(stderr.String())
+		finals := 0
+		for _, l := range lines {
+			if strings.HasPrefix(l, "progress (final):") {
+				finals++
+			}
+		}
+		if finals != 1 || !strings.HasPrefix(lines[len(lines)-1], "progress (final):") {
+			t.Fatalf("run %d: %d final lines, last line %q, want exactly one final line at the end", i, finals, lines[len(lines)-1])
+		}
+	}
+}
+
+func TestRunProgressOnCancelledRun(t *testing.T) {
+	dir := t.TempDir()
+	good := writeCSV(t, dir, "good.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	code, _, stderr := run(t, ctx, env(nil), "run", "-progress", good)
+	if code != exitCancelled {
+		t.Fatalf("exit = %d, want %d", code, exitCancelled)
+	}
+	lines := progressLines(stderr)
+	if len(lines) == 0 || !strings.HasPrefix(lines[len(lines)-1], "progress (final): files 1/1") {
+		t.Fatalf("progress lines = %q, want a final line counting the cancelled file", lines)
 	}
 }
 
