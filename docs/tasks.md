@@ -76,11 +76,19 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T5 — Per-row and per-file error handling
 
 - Owner: human
-- Status: draft
+- Status: done
 - ADR: 0002
-- Scope: typed `RowError` and `FileError` with sentinel kinds, first 100 row errors per file plus complete counts per kind, file statuses, file completion via batch count, CLI exit codes. Replaces the T1 "not implemented" stubs so exit 1 only means a `partial` or `failed` file; exit 2 for usage errors is documented next to the ADR 0002 codes in the README.
+- Scope: typed `RowError` and `FileError` with sentinel kinds, first 100 row errors per file plus complete counts per kind, file statuses, file completion via batch count, CLI exit codes. Replaces the T1 "not implemented" stubs so exit 1 only means a `partial` or `failed` file; exit codes 0/1/2/130 are listed in `fileproc run -h`; the README section is handed to T8.
 
 ### AC
+
+- [ ] Every file ends with exactly one status. In a single run containing one source of each kind: `ok` (no invalid rows, no file error), `ok_with_errors` (at least one invalid row), `partial` (a file error after at least one data row was read: mid-file I/O error or `ErrRecordTooLarge`), `failed` (a file error before any data row: open failure, missing or wrong header, empty file), `cancelled` (as defined in T4).
+- [ ] Each file keeps at most `MaxErrorsPerFile` row errors: those with the lowest line numbers, sorted by line, each with line, column (when the error is about one field), and kind. With `(readers, workers) = (4, 8)` the kept list is identical across 20 runs. Edge case: `MaxErrorsPerFile = 0` keeps no errors but still counts them.
+- [ ] Counts per error kind are complete regardless of the cap: a file with 10,000 invalid rows of mixed kinds reports exact per-kind counts that sum to its invalid count, while its list holds 100 errors.
+- [ ] Error kinds have stable names derived with `errors.Is`: `csv_syntax`, `field_count`, `missing_field`, `invalid_number`, `invalid_date`, and `other` for anything else.
+- [ ] A `partial` or `failed` file reports its file error and the last line read; a `partial` file's valid rows still count in the totals.
+- [ ] `fileproc run a.csv b.csv` runs the pipeline over real files and prints one summary line per file to stderr (path, status, valid, invalid, first kept error). It exits 0 when every file is `ok` or `ok_with_errors`.
+- [ ] Failure case: `fileproc run` exits 1 when any file is `partial` or `failed`, including a path that does not exist, and exits 130 when the run is cancelled. `fileproc run -h` lists the exit codes 0, 1, 2, and 130.
 
 ## T6 — Progress tracking
 
@@ -105,7 +113,7 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 - Owner: AI
 - Status: draft
 - ADR: -
-- Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), time from cancel to return under a realistic aggregator cost (ADR 0001, 200 ms target from T4), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
+- Scope: large dummy CSV generator, memory and throughput benchmarks per stage (reader, workers, aggregator), CLI exit codes 0/1/2/130 next to the ADR 0002 statuses, time from cancel to return under a realistic aggregator cost (ADR 0001, 200 ms target from T4), README covering the required deliverables, including the coverage report from `coverage.txt`, known limitations, and an `AI Usage` section from `docs/ai-log.md`.
 
 ### AC
 

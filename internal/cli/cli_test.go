@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -114,13 +116,90 @@ func TestRunRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestRunNotImplementedYet(t *testing.T) {
-	code, _, stderr := run(t, t.Context(), env(nil), "run", "a.csv")
-	if code != exitError {
-		t.Fatalf("exit = %d, want %d", code, exitError)
+const csvHeader = "transaction_id,outlet_id,product_id,quantity,amount,transacted_at\n"
+
+func writeCSV(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
-	if !strings.Contains(stderr, "not implemented") {
-		t.Fatalf("stderr = %q", stderr)
+	return path
+}
+
+func TestRunProcessesFiles(t *testing.T) {
+	dir := t.TempDir()
+	good := writeCSV(t, dir, "good.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n")
+	messy := writeCSV(t, dir, "messy.csv", csvHeader+
+		"t2,o1,p1,1,1000,2026-10-30T09:00:00Z\n"+
+		"t3,o1,p1,x,1000,2026-10-30T09:00:00Z\n")
+
+	code, _, stderr := run(t, t.Context(), env(nil), "run", good, messy)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, exitOK, stderr)
+	}
+	for _, want := range []string{
+		good + ": ok valid=1 invalid=0",
+		messy + ": ok_with_errors valid=1 invalid=1",
+		`first_error="line 3 column quantity: invalid number (value \"x\")"`,
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+func TestRunExitsOneOnFailedOrPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	good := writeCSV(t, dir, "good.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n")
+	badHeader := writeCSV(t, dir, "bad.csv", "nope\n")
+	missing := filepath.Join(dir, "missing.csv")
+
+	partial := writeCSV(t, dir, "partial.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n"+strings.Repeat("x", 100<<10)+"\n")
+
+	for name, tc := range map[string]struct {
+		paths  []string
+		status string
+	}{
+		"missing path": {[]string{good, missing}, ": failed "},
+		"bad header":   {[]string{good, badHeader}, ": failed "},
+		"partial file": {[]string{good, partial}, ": partial "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			code, _, stderr := run(t, t.Context(), env(nil), append([]string{"run"}, tc.paths...)...)
+			if code != exitError {
+				t.Fatalf("exit = %d, want %d; stderr: %s", code, exitError, stderr)
+			}
+			if !strings.Contains(stderr, tc.status) || !strings.Contains(stderr, good+": ok ") {
+				t.Fatalf("stderr = %s, want %q and the healthy file reported", stderr, tc.status)
+			}
+		})
+	}
+}
+
+func TestRunExitsOneThirtyWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	good := writeCSV(t, dir, "good.csv", csvHeader+"t1,o1,p1,2,5000,2026-10-30T09:00:00Z\n")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	code, _, stderr := run(t, ctx, env(nil), "run", good)
+	if code != exitCancelled {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, exitCancelled, stderr)
+	}
+	if !strings.Contains(stderr, ": cancelled ") {
+		t.Fatalf("stderr = %s, want the file reported as cancelled", stderr)
+	}
+}
+
+func TestRunHelpListsExitCodes(t *testing.T) {
+	code, _, stderr := run(t, t.Context(), env(nil), "run", "-h")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d", code, exitOK)
+	}
+	for _, want := range []string{"exit codes:", "  0 ", "  1 ", "  2 ", "  130 "} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("help missing %q:\n%s", want, stderr)
+		}
 	}
 }
 
