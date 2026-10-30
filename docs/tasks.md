@@ -26,11 +26,19 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T2 — Streaming CSV reader
 
 - Owner: AI
-- Status: draft
+- Status: done
 - ADR: 0001, 0002
-- Scope: read a single file row by row with `csv.Reader`, strip a UTF-8 byte order mark, validate the header, record the physical line number of each row, emit rows in batches.
+- Scope: read a single file row by row with `csv.Reader`, strip a UTF-8 byte order mark, validate the header, record the physical line number of each row, emit rows in batches. Also the pure row conversion function the workers will call in T3, with the sentinel error kinds from ADR 0002.
 
 ### AC
+
+- [ ] Header: the first record must be exactly `transaction_id,outlet_id,product_id,quantity,amount,transacted_at` after stripping a leading UTF-8 byte order mark. A missing, reordered, or extra column, or an empty file, returns an error matching `ErrHeaderMismatch` and sends no batch.
+- [ ] Rows are sent on the output channel in batches of at most `BatchSize`; every row carries its file ID and the physical line where its record starts, including after a quoted field that spans several lines. Mutating a record after it was sent does not change any other row.
+- [ ] Edge case: a row with bad quoting or the wrong number of fields does not stop the file; it is attached to the batch as a row error matching `ErrCSVSyntax` or `ErrFieldCount` with its line number, and the rows after it are still sent.
+- [ ] Failure case: an I/O error from the underlying reader mid-file stops the reader and returns an error that wraps the cause and reports the last line read; batches sent before the error are not withdrawn.
+- [ ] `ParseTransaction` converts a record into a `Transaction` with `int64` quantity and amount and a `time.Time` from RFC 3339; empty fields, non-integer or overflowing numbers, a quantity below 1, a negative amount, and unparsable timestamps return errors matching `ErrMissingField`, `ErrInvalidNumber`, or `ErrInvalidDate` and name the column.
+- [ ] A reader blocked on a full output channel returns an error matching `context.Canceled` within 100 ms of cancellation, and `goleak` reports no leaked goroutine.
+- [ ] Reading a generated 1,000,000-row stream that never touches disk, while the consumer discards batches, keeps `HeapAlloc` below 32 MB at every batch.
 
 ## T3 — Worker pool and backpressure
 

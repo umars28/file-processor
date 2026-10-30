@@ -81,6 +81,7 @@ func runCmd(args []string, stderr io.Writer) int {
 	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "number of workers converting and validating rows")
 	fs.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "rows per batch sent between pipeline stages")
 	fs.IntVar(&cfg.MaxErrorsPerFile, "max-errors-per-file", cfg.MaxErrorsPerFile, "row errors kept per file in the report")
+	fs.IntVar(&cfg.MaxRecordBytes, "max-record-bytes", cfg.MaxRecordBytes, "approximate largest CSV record, in bytes, before the file fails")
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}

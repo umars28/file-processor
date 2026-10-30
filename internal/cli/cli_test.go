@@ -64,7 +64,7 @@ func TestTopLevelHelp(t *testing.T) {
 
 func TestSubcommandHelpListsFlags(t *testing.T) {
 	tests := map[string][]string{
-		"run":     {"-readers", "-workers", "-batch-size", "-max-errors-per-file"},
+		"run":     {"-readers", "-workers", "-batch-size", "-max-errors-per-file", "-max-record-bytes"},
 		"serve":   {"-addr"},
 		"migrate": {"usage: fileproc migrate"},
 	}

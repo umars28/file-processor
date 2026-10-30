@@ -26,6 +26,7 @@ func TestConfigValidate(t *testing.T) {
 		{"negative workers", func(c *Config) { c.Workers = -1 }},
 		{"zero batch size", func(c *Config) { c.BatchSize = 0 }},
 		{"negative max errors", func(c *Config) { c.MaxErrorsPerFile = -1 }},
+		{"zero max record bytes", func(c *Config) { c.MaxRecordBytes = 0 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

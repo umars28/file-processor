@@ -10,7 +10,7 @@ The processor ingests POS sales transaction CSVs from multiple outlets through t
 Two classes of failure exist:
 
 - Row-level: one row fails. The rest of the file is still usable.
-- File-level: the file cannot be opened, the header is missing or does not match the expected schema, or an I/O error occurs mid-read. Nothing more can be read from that file, but other files must keep going.
+- File-level: the file cannot be opened, the header is missing or does not match the expected schema, an I/O error occurs mid-read, or a single record grows past a size limit (for example an unclosed quote that would swallow the rest of the file). Nothing more can be read from that file, but other files must keep going.
 
 Row-level errors have two sources in the ADR 0001 pipeline:
 
@@ -63,7 +63,7 @@ Invalid rows are written to `<name>.rejected.csv` with extra columns `line` and 
 
 ### C1. Fatal only on structural failure
 
-A file fails only when it cannot be opened, its header does not match the expected schema after stripping a UTF-8 byte order mark, or an I/O error occurs mid-read. Any number of invalid rows is allowed.
+A file fails only when it cannot be opened, its header does not match the expected schema after stripping a UTF-8 byte order mark, an I/O error occurs mid-read, or a record exceeds the size limit. Any number of invalid rows is allowed.
 
 - Pros:
   - Header validation catches the most damaging case, a file with the wrong schema, before any row is aggregated.
@@ -94,6 +94,7 @@ How it works:
 - Each file keeps its first 100 row errors (`--max-errors-per-file`), with the line, column, and reason. The count per error kind is always complete, even after the list is full.
 - The reader strips a UTF-8 byte order mark and checks the header before sending anything. If the header doesn't match, the file fails with nothing aggregated.
 - If a file breaks halfway through (an I/O error), I keep what was already counted and mark the file as `partial`, with the error and the last line read. Throwing those rows away would need per-file staging in the aggregator, and I think a clearly marked partial file is the more honest result anyway.
+- The same goes for a record that is too large. Without a cap, one unclosed quote early in an export makes `csv.Reader` hold the rest of the file in memory, which breaks the memory bound from ADR 0001. So a record past `--max-record-bytes` (64 KiB by default, enforced to within a few KiB) stops the file with `ErrRecordTooLarge`. I can't resync after that, because I no longer know where the next record starts, so the file ends as `partial` just like an I/O error.
 - To know a file is finished, its reader sends a final status with the number of batches it produced. The aggregator closes the file once that status and all of its batches have arrived.
 - Errors are typed: `RowError` and `FileError` wrap sentinel kinds such as `ErrCSVSyntax`, `ErrFieldCount`, `ErrMissingField`, `ErrInvalidNumber`, `ErrInvalidDate`, and `ErrHeaderMismatch`, so tests use `errors.Is` and `errors.As` instead of comparing strings.
 - Each file ends as `ok`, `ok_with_errors`, `partial`, `failed`, or `cancelled`.
@@ -106,7 +107,7 @@ How it's reported depends on the entry point (ADR 0003):
 ## Consequences
 
 - T2 strips the byte order mark, validates the header, and records physical line numbers.
-- T5 implements the report types, error kinds, statuses, and CLI exit codes; its AC can assert on `errors.Is` and on exact counts.
+- T5 implements the report types, error kinds, statuses, and CLI exit codes; its AC can assert on `errors.Is` and on exact counts. `ErrRecordTooLarge` maps to `partial`.
 - T7 aggregates may include rows from a `partial` file, so the README and the report have to make that visible.
 - Invalid rows beyond the first 100 are counted but not listed. If someone needs every rejected row, B can be added later without changing who owns the report.
 - T4 doesn't have an extra writer goroutine to shut down.
