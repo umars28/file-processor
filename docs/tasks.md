@@ -43,18 +43,26 @@ Order: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T9 → T10 → T8
 ## T3 — Worker pool and backpressure
 
 - Owner: human
-- Status: draft
+- Status: done
 - ADR: 0001
 - Scope: readers bounded by `--readers`, fixed pool of `--workers`, buffered channels between stages, single aggregator owning all maps, amounts as `int64`.
 
 ### AC
+
+- [ ] `pipeline.Run(ctx, cfg, sources)` processes every source, where a source is a file ID plus an `Open` function returning an `io.ReadCloser`. The result's totals (valid transactions, quantity, amount as `int64`) equal a sum computed independently from the generated input, for `(readers, workers)` of `(1, 1)`, `(4, 8)`, and `(2, runtime.NumCPU())`.
+- [ ] Determinism: 20 repeated runs over the same 50 generated sources with `(4, 8)` produce identical results.
+- [ ] At most `Readers` sources are open at the same time, measured by an instrumented `Open`/`Close`, and every opened source is closed, including when reading it fails.
+- [ ] The goroutine count is independent of input size: while processing 1,000 sources, `runtime.NumGoroutine()` never exceeds the count before `Run` plus `Readers + Workers + 4`.
+- [ ] Rows rejected by `ParseTransaction` are counted as invalid for their file and never reach the totals. Edge case: a source whose rows are all invalid contributes zero to the totals, and its invalid count equals its row count.
+- [ ] Failure case: a source that fails to open, has a wrong header, or returns an I/O error mid-file is recorded in the result for that file only; every other source is still fully processed, and `Run` returns a nil error.
+- [ ] Processing 200 sources of 10,000 rows each keeps `HeapAlloc` below 64 MB, and `Run` returns only after every goroutine it started has exited (`goleak` passes with `-race`).
 
 ## T4 — Cancellation and graceful shutdown
 
 - Owner: human
 - Status: draft
 - ADR: 0001
-- Scope: `context` driven by OS signals, channels closed only by their senders, all goroutines stop on both normal finish and cancel, no goroutine leaks. A cancelled run keeps file reports and drops aggregates.
+- Scope: `context` driven by OS signals, channels closed only by their senders, all goroutines stop on both normal finish and cancel, no goroutine leaks. A cancelled run keeps file reports and drops aggregates. Carried over from the T3 review: cancelled files must be distinguishable from completed ones (currently `Err == nil` and `Done == false`), `context.DeadlineExceeded` must be treated like `context.Canceled` instead of surfacing as a raw file error, `Run` must not return partial `Totals` on cancel, and a blocking `Source.Open` must either take a `context` or be documented as a limit on how fast cancel takes effect.
 
 ### AC
 
