@@ -15,8 +15,20 @@ services:
       timeout: 3s
       retries: 15
 
+  migrate:
+    build: .
+    image: file-processor:dev
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://fileproc:${POSTGRES_PASSWORD:-fileproc}@db:5432/fileproc?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   app:
     build: .
+    image: file-processor:dev
     command: ["serve"]
     environment:
       DATABASE_URL: postgres://fileproc:${POSTGRES_PASSWORD:-fileproc}@db:5432/fileproc?sslmode=disable
@@ -29,6 +41,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:

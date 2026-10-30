@@ -28,15 +28,17 @@ Majoo take-home, Test Case 1: concurrent CSV processor in Go. Data: POS sales tr
 - Write tests first, then the implementation.
 - Every package that starts goroutines must call `goleak.VerifyTestMain(m)` (`go.uber.org/goleak`) in its `TestMain`.
 - `make check` must pass before a task is reported as finished.
+- Never run two test commands against the shared Compose database at the same time; `FailUnfinishedJobs` in one run fails the jobs of the other.
 
 ## Commands
 
 | Command | What it runs |
 |---|---|
-| `make test` | `go test -race` with coverage profile |
+| `make test` | `go test -race` with coverage profile; points `TEST_DATABASE_URL` at the Compose database, so start it first with `docker compose up -d db` |
+| `make test-integration` | only the `internal/store` tests against the Compose database |
 | `make cover` | `make test` + `coverage.txt`, `coverage.html`, fails below `COVERAGE_MIN` (80%) |
 | `make lint` | `golangci-lint` incl. `govet`, `staticcheck`, `errcheck`, `gosec` |
 | `make vuln` | `govulncheck` on dependencies |
 | `make secrets` | `gitleaks` on the working tree and git history |
-| `make check` | all of the above |
+| `make check` | all of the above; needs the Compose database. Plain `go test ./...` without `TEST_DATABASE_URL` skips the store tests |
 | `make hooks` | enables `.githooks/`: gitleaks on pre-commit, block pushes to `main` on pre-push |

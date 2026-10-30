@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-30
+- Amended: 2026-10-30 (T9: schema details)
 
 ## Context
 
@@ -70,6 +71,13 @@ The schema:
 - `job_files`: one row per input file, `job_id` foreign key with `ON DELETE CASCADE`, `path`, `status`, `total_rows`, `valid_rows`, `invalid_rows`, `last_line`, `error`, and `error_counts jsonb` for the count per error kind. Unique on `(job_id, path)`.
 - `row_errors`: `job_file_id` foreign key, `line`, `column_name`, `kind`, `message`. At most 100 per file, enforced by the application.
 - `sales_daily`: `job_id`, `outlet_id`, `product_id`, `sale_date`, `quantity bigint`, `amount bigint`, with the primary key `(job_id, outlet_id, product_id, sale_date)`.
+
+When I wrote the migration I adjusted a few details:
+
+- `sales_daily` also stores `transactions`, because the daily result from T7 counts them, and its primary key is `(job_id, sale_date, outlet_id, product_id)` so the results query reads rows in the order the API returns them.
+- `job_files` keeps the file's `position` in the job (unique per job), stores `close_error` next to `error` (ADR 0002), and drops `total_rows`, which is just `valid_rows + invalid_rows`. Row errors use `(job_file_id, line)` as their key because a file has at most one error per line.
+- A partial index on `jobs (status)` for `queued` and `running` serves the startup recovery query, which runs on every start.
+- Job IDs come from `gen_random_uuid()` in PostgreSQL, so the Go side needs no UUID library.
 
 Results are scoped to a job. Two jobs that read the same file produce two independent result sets; I'm not merging across jobs.
 

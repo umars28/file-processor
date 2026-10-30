@@ -18,6 +18,7 @@ import (
 	"github.com/umars28/file-processor/internal/httpapi"
 	"github.com/umars28/file-processor/internal/pipeline"
 	"github.com/umars28/file-processor/internal/report"
+	"github.com/umars28/file-processor/internal/store"
 )
 
 const (
@@ -36,8 +37,6 @@ subcommands:
 
 run "fileproc <subcommand> -h" for subcommand flags`
 
-var errNotImplemented = errors.New("not implemented yet")
-
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, usage)
@@ -49,7 +48,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	case "serve":
 		return serveCmd(ctx, args[1:], stderr, getenv)
 	case "migrate":
-		return migrateCmd(args[1:], stderr, getenv)
+		return migrateCmd(ctx, args[1:], stderr, getenv)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, usage)
 		return exitOK
@@ -263,15 +262,19 @@ func serveCmd(ctx context.Context, args []string, stderr io.Writer, getenv func(
 	return exitOK
 }
 
-func migrateCmd(args []string, stderr io.Writer, getenv func(string) string) int {
+func migrateCmd(ctx context.Context, args []string, stderr io.Writer, getenv func(string) string) int {
 	fs := newFlagSet("migrate", "[flags]", stderr)
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
-	if _, err := config.Load(getenv); err != nil {
+	cfg, err := config.Load(getenv)
+	if err != nil {
 		fmt.Fprintf(stderr, "migrate: %v\n", err)
 		return exitError
 	}
-	fmt.Fprintf(stderr, "migrate: %v\n", errNotImplemented)
-	return exitError
+	if err := store.Migrate(ctx, cfg.DatabaseURL, stderr); err != nil {
+		fmt.Fprintf(stderr, "migrate: %v\n", err)
+		return exitError
+	}
+	return exitOK
 }
